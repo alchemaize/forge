@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Direct AWS infrastructure management. No stacks. No state files. No surprises.",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "forge": "./dist/cli.js"
   },

@@ -323,7 +323,14 @@ async function ensureSecret(
   console.log(`[rds] Creating secret: ${secretName}`);
   const res = await sm.send(new CreateSecretCommand({
     Name: secretName,
-    SecretString: JSON.stringify({ username, password, dbname: appName }),
+    SecretString: JSON.stringify({
+      username,
+      password,
+      engine: 'postgres',
+      host: 'PENDING',  // Updated after cluster/instance is available
+      port: 5432,
+      dbname: appName,
+    }),
     Tags: [{ Key: 'app', Value: appName }, { Key: 'managed-by', Value: 'forge' }],
   }));
   return res.ARN!;
@@ -427,7 +434,7 @@ export async function applyRds(
           MinCapacity: config.minCapacity ?? 0.5,
           MaxCapacity: config.maxCapacity ?? 4,
         },
-        DBSubnetGroupName: undefined, // Will use default or we need to create one
+        DBSubnetGroupName: vpcState.dbSubnetGroupName,
         VpcSecurityGroupIds: vpcState.securityGroupIds.rds
           ? [vpcState.securityGroupIds.rds]
           : [vpcState.securityGroupIds.default],
@@ -488,6 +495,21 @@ export async function applyRds(
           parameterGroupName: paramGroupName,
         };
       }
+
+      // Update secret with real endpoint
+      const sm = getClient(ctx, SecretsManagerClient);
+      await sm.send(new UpdateSecretCommand({
+        SecretId: secretArn,
+        SecretString: JSON.stringify({
+          username: masterUsername,
+          password,
+          engine: 'postgres',
+          host: clusterEndpoint,
+          port: 5432,
+          dbname: config.dbName,
+        }),
+      }));
+      console.log('[rds] Secret updated with cluster endpoint');
 
       // Create proxy if requested
       let proxyEndpoint: string | undefined;

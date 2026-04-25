@@ -35,6 +35,12 @@ import type { VpcConfig } from '../config.js';
 import { getClient } from '../aws.js';
 import { addChange, type Plan, type ResourceChange } from '../diff.js';
 
+// Lazy-import RDS client for DB subnet group operations
+async function getRdsClient(ctx: AwsContext) {
+  const { RDSClient } = await import('@aws-sdk/client-rds');
+  return getClient(ctx, RDSClient);
+}
+
 export interface VpcState {
   vpcId: string;
   cidr: string;
@@ -43,6 +49,7 @@ export interface VpcState {
   isolatedSubnetIds: string[];
   natGatewayId?: string;
   internetGatewayId?: string;
+  dbSubnetGroupName?: string;
   securityGroupIds: {
     default: string;
     lambda?: string;
@@ -127,6 +134,23 @@ export async function describeVpc(
       return name.toLowerCase().includes('rds') || name.toLowerCase().includes('database') || name.toLowerCase().includes('aurora');
     })?.GroupId;
 
+    // Look for DB subnet group
+    let dbSubnetGroupName: string | undefined;
+    try {
+      const rdsClient = await getRdsClient(ctx);
+      const { DescribeDBSubnetGroupsCommand } = await import('@aws-sdk/client-rds');
+      const sgRes2 = await rdsClient.send(new DescribeDBSubnetGroupsCommand({}));
+      const matchingGroup = sgRes2.DBSubnetGroups?.find(g => {
+        const subnetsInVpc = g.Subnets?.some(s =>
+          [...publicSubnetIds, ...privateSubnetIds, ...isolatedSubnetIds].includes(s.SubnetIdentifier!)
+        );
+        return subnetsInVpc;
+      });
+      dbSubnetGroupName = matchingGroup?.DBSubnetGroupName;
+    } catch {
+      // No RDS access or no subnet groups — not critical for VPC describe
+    }
+
     return {
       vpcId: config.vpcId,
       cidr: vpc.CidrBlock ?? '',
@@ -135,6 +159,7 @@ export async function describeVpc(
       isolatedSubnetIds,
       natGatewayId,
       internetGatewayId,
+      dbSubnetGroupName,
       securityGroupIds: { default: defaultSg, lambda: lambdaSg, rdsProxy: rdsProxySg, rds: rdsSg },
     };
   }
@@ -274,10 +299,17 @@ export async function applyVpc(
   const privateSubnetIds: string[] = [];
   const isolatedSubnetIds: string[] = [];
 
-  // Subnet CIDR allocation: /20 blocks
-  // Public: 10.0.0.0/20, 10.0.16.0/20
-  // Private: 10.0.32.0/20, 10.0.48.0/20
-  // Isolated: 10.0.64.0/20, 10.0.80.0/20
+  // Parse VPC CIDR to derive subnet CIDRs
+  // Strategy: split the VPC /16 into /20 blocks
+  const [cidrBase] = cidr.split('/');
+  const cidrParts = cidrBase.split('.').map(Number);
+  const baseFirst = cidrParts[0];
+  const baseSecond = cidrParts[1];
+
+  // Subnet CIDR allocation: /20 blocks within the VPC CIDR
+  // Public:  base.0.0/20, base.16.0/20
+  // Private: base.32.0/20, base.48.0/20
+  // Isolated: base.64.0/20, base.80.0/20
   const subnetConfigs: Array<{ type: string; ids: string[]; offset: number }> = [
     { type: 'Public', ids: publicSubnetIds, offset: 0 },
   ];
@@ -291,7 +323,7 @@ export async function applyVpc(
   for (const sc of subnetConfigs) {
     for (let i = 0; i < azs.length; i++) {
       const thirdOctet = sc.offset + i * 16;
-      const subnetCidr = `10.0.${thirdOctet}.0/20`;
+      const subnetCidr = `${baseFirst}.${baseSecond}.${thirdOctet}.0/20`;
       console.log(`[vpc] Creating ${sc.type} subnet in ${azs[i]}: ${subnetCidr}`);
       const subRes = await ec2.send(new CreateSubnetCommand({
         VpcId: vpcId,
@@ -467,6 +499,26 @@ export async function applyVpc(
 
   console.log(`[vpc] Created VPC ${vpcId} with ${publicSubnetIds.length} public, ${privateSubnetIds.length} private, ${isolatedSubnetIds.length} isolated subnets`);
 
+  // 8. Create DB subnet group (required for Aurora/RDS in non-default VPCs)
+  let dbSubnetGroupName: string | undefined;
+  const dbSubnets = isolatedSubnetIds.length > 0 ? isolatedSubnetIds : privateSubnetIds;
+  if (dbSubnets.length >= 2) {
+    dbSubnetGroupName = `${appName}-db-subnet-group`;
+    console.log(`[vpc] Creating DB subnet group: ${dbSubnetGroupName}`);
+    const rdsClient = await getRdsClient(ctx);
+    const { CreateDBSubnetGroupCommand } = await import('@aws-sdk/client-rds');
+    await rdsClient.send(new CreateDBSubnetGroupCommand({
+      DBSubnetGroupName: dbSubnetGroupName,
+      DBSubnetGroupDescription: `Database subnets for ${appName}`,
+      SubnetIds: dbSubnets,
+      Tags: [
+        { Key: 'app', Value: appName },
+        { Key: 'managed-by', Value: 'forge' },
+      ],
+    }));
+    console.log(`[vpc] Created DB subnet group with ${dbSubnets.length} subnets`);
+  }
+
   return {
     vpcId,
     cidr,
@@ -475,6 +527,7 @@ export async function applyVpc(
     isolatedSubnetIds,
     natGatewayId,
     internetGatewayId: igwId,
+    dbSubnetGroupName,
     securityGroupIds: {
       default: defaultSgId,
       lambda: lambdaSgId,

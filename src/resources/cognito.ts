@@ -280,6 +280,7 @@ export async function applyCognito(
         SmsVerificationMessage: pool.SmsVerificationMessage,
         EmailVerificationMessage: pool.EmailVerificationMessage,
         EmailVerificationSubject: pool.EmailVerificationSubject,
+        VerificationMessageTemplate: pool.VerificationMessageTemplate,
         SmsAuthenticationMessage: pool.SmsAuthenticationMessage,
         MfaConfiguration: pool.MfaConfiguration,
         DeviceConfiguration: pool.DeviceConfiguration,
@@ -293,6 +294,48 @@ export async function applyCognito(
         LambdaConfig: desiredTriggers,
       }));
       console.log('[cognito] Triggers updated');
+
+      // Add Lambda invoke permissions for each trigger
+      const { LambdaClient, AddPermissionCommand, GetPolicyCommand } = await import('@aws-sdk/client-lambda');
+      const lambdaClient = new LambdaClient({ region: ctx.region, credentials: ctx.credentials });
+      const poolArn = existing.userPoolArn;
+
+      const triggerFunctions = [
+        config.triggers.preTokenGeneration,
+        config.triggers.postConfirmation,
+        config.triggers.preSignUp,
+        config.triggers.customMessage,
+      ].filter(Boolean) as string[];
+
+      for (const fnName of triggerFunctions) {
+        const statementId = `cognito-trigger-${fnName}`.replace(/[^a-zA-Z0-9_-]/g, '-');
+        try {
+          // Check if permission already exists
+          const policy = await lambdaClient.send(new GetPolicyCommand({ FunctionName: fnName }));
+          const policyDoc = JSON.parse(policy.Policy!);
+          const hasPermission = policyDoc.Statement?.some(
+            (s: any) => s.Principal?.Service === 'cognito-idp.amazonaws.com'
+          );
+          if (hasPermission) continue;
+        } catch {
+          // No policy exists — need to add permission
+        }
+
+        try {
+          await lambdaClient.send(new AddPermissionCommand({
+            FunctionName: fnName,
+            StatementId: statementId,
+            Action: 'lambda:InvokeFunction',
+            Principal: 'cognito-idp.amazonaws.com',
+            SourceArn: poolArn,
+          }));
+          console.log(`[cognito] Added invoke permission for trigger: ${fnName}`);
+        } catch (err: any) {
+          if (err.name !== 'ResourceConflictException') {
+            console.log(`[cognito] Warning: could not add permission for ${fnName}: ${err.message}`);
+          }
+        }
+      }
     }
   }
 

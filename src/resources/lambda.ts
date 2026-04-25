@@ -100,6 +100,22 @@ export async function planLambda(
       fields.push({ field: 'timeout', current: current.timeout, desired: desiredTimeout });
     }
 
+    // Check env var drift if env vars are specified in config
+    if (config.env) {
+      const lambdaClient = getClient(ctx, LambdaClient);
+      try {
+        const detail = await lambdaClient.send(new GetFunctionCommand({ FunctionName: config.name }));
+        const currentEnv = detail.Configuration?.Environment?.Variables ?? {};
+        for (const [key, desiredVal] of Object.entries(config.env)) {
+          if (currentEnv[key] !== desiredVal) {
+            fields.push({ field: `env.${key}`, current: currentEnv[key] ?? '(unset)', desired: desiredVal });
+          }
+        }
+      } catch {
+        // Can't check env vars — skip
+      }
+    }
+
     addChange(plan, {
       resourceType: 'lambda',
       resourceId: config.name,
