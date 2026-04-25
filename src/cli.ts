@@ -42,6 +42,7 @@ Usage:
   forge destroy <type>:<name>    Tear down a specific resource
   forge import                   Import a CloudFormation stack into a forge config
   forge discover                 Discover resources from a live AWS account (no stack needed)
+  forge diagram                  Generate an architecture diagram (PNG) from config
 
 Options:
   --config <path>                Config file (default: ./forge.config.ts)
@@ -66,6 +67,7 @@ Examples:
   forge import --stack YeonCrm --profile yeoncrm
   forge import --stack STRfish --profile strfish --output strfish.forge.config.ts
   forge discover --app aegistrader --profile aegis
+  forge diagram --config myapp.forge.config.ts
   forge destroy lambda:my-temp-function
   forge destroy dynamodb:my-table --confirm-data-loss
 `);
@@ -137,6 +139,14 @@ Examples:
     case 'status':
       await status(config);
       break;
+
+    case 'diagram': {
+      const outputIdx2 = args.indexOf('--output');
+      const diagramOutput = outputIdx2 >= 0 ? args[outputIdx2 + 1] : undefined;
+      const { generateDiagram } = await import('./diagram.js');
+      await generateDiagram(config, diagramOutput);
+      break;
+    }
 
     case 'destroy': {
       const target = args[1];

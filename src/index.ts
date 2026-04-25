@@ -12,6 +12,7 @@ export type { AwsContext } from './aws.js';
 export { plan, apply, status } from './engine.js';
 export { importStack } from './import.js';
 export { discoverApp } from './discover.js';
+export { generateDiagram } from './diagram.js';
 
 // Resource modules (for direct use in custom scripts)
 export * as vpc from './resources/vpc.js';

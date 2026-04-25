@@ -121,6 +121,23 @@ Discovery strategy:
 - Queries full config for each discovered resource
 - Produces the same typed config as `forge import`
 
+### `forge diagram`
+
+Generate an architecture diagram (PNG) from your forge config. Uses the Python `diagrams` library with the Alchemaize Catalyst visual style — Application Plane, Data Plane, and Control Plane clusters.
+
+```bash
+forge diagram --config myapp.forge.config.ts
+forge diagram --config myapp.forge.config.ts --output myapp-architecture.png
+```
+
+Prerequisites:
+```bash
+pip3 install diagrams
+brew install graphviz
+```
+
+The diagram is generated automatically from your config — no hand-coding. It maps each resource to the correct AWS icon, groups them into planes, and draws the connections (API GW → Lambda → RDS Proxy → Aurora, Users → Cognito, etc.).
+
 ### `forge destroy`
 
 Tear down a specific resource. Safety tiers prevent accidental data loss.
