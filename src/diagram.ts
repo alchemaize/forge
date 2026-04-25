@@ -1,186 +1,246 @@
 /**
- * Forge diagram — generates an AWS architecture diagram from a forge config.
+ * Forge diagram — generates professional AWS architecture diagrams.
  *
- * Uses the Python `diagrams` library (mingrammer/diagrams) which renders
- * via Graphviz. Forge generates a temporary Python script from the config,
- * runs it, and produces a PNG.
+ * Follows AWS Architecture Diagram Guidelines:
+ * - Official AWS icon set via mingrammer/diagrams library
+ * - Proper boundary grouping: AWS Cloud → Region → VPC → Subnets
+ * - Service scope awareness: S3/Cognito/CloudWatch are regional (outside VPC),
+ *   Lambda/RDS/Proxy are VPC-scoped (inside VPC)
+ * - Numbered callouts for data flow
+ * - Consistent edge colors: purple=auth, red=API, orange=async, gray=observability
+ * - Landscape and portrait orientation support
+ * - Large readable fonts (12pt nodes, 16pt clusters, 20pt title)
  *
  * Prerequisites:
  *   pip3 install diagrams
- *   brew install graphviz  (or apt-get install graphviz)
- *
- * Usage:
- *   forge diagram --config myapp.forge.config.ts
- *   forge diagram --config myapp.forge.config.ts --output myapp-architecture.png
+ *   brew install graphviz
  */
 
-import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { writeFileSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
-import { resolve, dirname, basename } from 'path';
 import type { ForgeConfig } from './config.js';
 
+export type DiagramOrientation = 'landscape' | 'portrait';
+
 // ---------------------------------------------------------------------------
-// Map forge resource types to diagrams library node types
+// Node and edge model
 // ---------------------------------------------------------------------------
 
 interface DiagramNode {
   id: string;
-  importPath: string;
+  importModule: string;
   className: string;
   label: string;
-  cluster: 'app' | 'control' | 'data';
+  /** Where this node lives in the AWS boundary hierarchy */
+  scope: 'external' | 'regional' | 'vpc' | 'public-subnet' | 'private-subnet';
 }
+
+interface DiagramEdge {
+  from: string;
+  to: string;
+  label?: string;
+  color: string;
+  style: 'solid' | 'dashed' | 'dotted';
+  penwidth?: string;
+  fontsize?: string;
+  /** Numbered callout (1, 2, 3...) */
+  callout?: number;
+}
+
+// AWS-official edge color palette
+const EDGE_COLORS = {
+  auth: '#8E44AD',       // Purple — authentication flows
+  api: '#E74C3C',        // Red — API/data traffic
+  data: '#232F3E',       // AWS dark — primary data flow
+  async: '#F39C12',      // Orange — async/scheduled
+  deploy: '#27AE60',     // Green — deployment pipelines
+  observe: '#95A5A6',    // Gray — logging/monitoring
+  cdn: '#1ABC9C',        // Teal — CDN/static content
+};
+
+// ---------------------------------------------------------------------------
+// Build nodes from config — scope-aware placement
+// ---------------------------------------------------------------------------
 
 function buildNodes(config: ForgeConfig): DiagramNode[] {
   const nodes: DiagramNode[] = [];
   const app = config.app;
+  const hasVpc = !!config.vpc;
 
-  // API Gateway
+  // --- External ---
+  // Users node is handled separately in the script
+
+  // --- Regional services (outside VPC) ---
+
+  if (config.cognito) {
+    const methods: string[] = [];
+    if (config.cognito.emailSignup) methods.push('Email/Password');
+    if (config.cognito.appleSignIn) methods.push('Apple Sign In');
+    if (config.cognito.googleSignIn) methods.push('Google');
+    nodes.push({
+      id: 'cognito',
+      importModule: 'diagrams.aws.security',
+      className: 'Cognito',
+      label: `Cognito User Pool\\n${methods.join(', ') || 'Email/Password'}`,
+      scope: 'regional',
+    });
+  }
+
   if (config.apiGateway) {
+    const routeCount = (config.apiGateway.publicRoutes?.length ?? 0) + (config.apiGateway.catchAll !== false ? 5 : 0);
     nodes.push({
       id: 'apigw',
-      importPath: 'diagrams.aws.network',
+      importModule: 'diagrams.aws.network',
       className: 'APIGateway',
-      label: `API Gateway v2\\nHTTP API\\n(JWT Authorizer)`,
-      cluster: 'app',
+      label: `API Gateway HTTP\\n${routeCount} Routes\\nJWT Authorizer`,
+      scope: 'regional',
     });
   }
 
-  // Lambda functions
+  // S3 is regional, not VPC-scoped
+  for (const bucket of config.s3 ?? []) {
+    const shortName = bucket.name
+      .replace(`${app}-`, '')
+      .replace(/\{account\}-?\{region\}/, '')
+      .replace(/-$/, '')
+      .replace(/^-/, '') || 'data';
+    const idSafe = shortName.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `s3_${idSafe}`,
+      importModule: 'diagrams.aws.storage',
+      className: 'S3',
+      label: `S3\\n${shortName}`,
+      scope: 'regional',
+    });
+  }
+
+  // ECR is regional
+  for (const ecr of config.ecr ?? []) {
+    const idSafe = ecr.name.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `ecr_${idSafe}`,
+      importModule: 'diagrams.aws.compute',
+      className: 'ECR',
+      label: `ECR\\n${ecr.name}`,
+      scope: 'regional',
+    });
+  }
+
+  // CloudWatch is regional
+  nodes.push({
+    id: 'cloudwatch',
+    importModule: 'diagrams.aws.management',
+    className: 'Cloudwatch',
+    label: 'CloudWatch\\nLogs & Metrics',
+    scope: 'regional',
+  });
+
+  // Secrets Manager is regional
+  if (config.rds) {
+    nodes.push({
+      id: 'secrets',
+      importModule: 'diagrams.aws.security',
+      className: 'SecretsManager',
+      label: 'Secrets Manager\\nDB Credentials',
+      scope: 'regional',
+    });
+  }
+
+  // EventBridge is regional
+  if (config.eventbridge?.length) {
+    nodes.push({
+      id: 'eventbridge',
+      importModule: 'diagrams.aws.integration',
+      className: 'Eventbridge',
+      label: `EventBridge\\n${config.eventbridge.length} Rule${config.eventbridge.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+
+  // --- VPC-scoped services ---
+
+  // Lambda functions go in private subnets if VPC-enabled
   for (const fn of config.lambda ?? []) {
-    const shortName = fn.name.replace(`${app}-`, '').replace(app, '');
-    const cleanName = shortName || fn.name;
+    const shortName = fn.name
+      .replace(`${app}-`, '')
+      .replace(new RegExp(`^${app}`, 'i'), '')
+      .replace(/^-/, '') || fn.name;
     const idSafe = fn.name.replace(/[^a-zA-Z0-9]/g, '_');
+
+    // Determine label details
+    const details: string[] = [];
+    if (fn.handler && fn.handler !== 'index.handler') details.push(fn.handler);
+    if (fn.memory && fn.memory !== 512) details.push(`${fn.memory} MB`);
+
+    const labelParts = [shortName, `Lambda (${fn.runtime ?? 'nodejs20.x'})`];
+    if (details.length) labelParts.push(details.join(' / '));
+
     nodes.push({
       id: `lambda_${idSafe}`,
-      importPath: 'diagrams.aws.compute',
+      importModule: 'diagrams.aws.compute',
       className: 'Lambda',
-      label: `${cleanName}\\nLambda\\n(${fn.runtime ?? 'nodejs20.x'})`,
-      cluster: 'app',
+      label: labelParts.join('\\n'),
+      scope: fn.vpc && hasVpc ? 'private-subnet' : 'regional',
     });
   }
 
-  // RDS / Aurora
+  // ECS Express goes in public subnets
+  for (const ecs of config.ecsExpress ?? []) {
+    const idSafe = ecs.name.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `ecs_${idSafe}`,
+      importModule: 'diagrams.aws.compute',
+      className: 'ECS',
+      label: `ECS Express Mode\\n${ecs.name}\\n${ecs.cpu ?? 512} CPU / ${ecs.memory ?? 1024} MB`,
+      scope: hasVpc ? 'public-subnet' : 'regional',
+    });
+  }
+
+  // RDS Proxy in private subnets
+  if (config.rds?.proxy !== false && config.rds?.mode === 'aurora-serverless-v2') {
+    nodes.push({
+      id: 'rds_proxy',
+      importModule: 'diagrams.aws.database',
+      className: 'RDS',
+      label: 'RDS Proxy\\nConnection Pooling\\nTLS Required',
+      scope: hasVpc ? 'private-subnet' : 'regional',
+    });
+  }
+
+  // Aurora / RDS in isolated subnets
   if (config.rds) {
     if (config.rds.mode === 'aurora-serverless-v2') {
       nodes.push({
         id: 'aurora',
-        importPath: 'diagrams.aws.database',
+        importModule: 'diagrams.aws.database',
         className: 'Aurora',
-        label: `Aurora Serverless v2\\nPostgreSQL ${config.rds.engineVersion ?? '16.4'}\\n${config.rds.dbName}`,
-        cluster: 'data',
+        label: `Aurora Serverless v2\\nPostgreSQL ${config.rds.engineVersion ?? '16.4'}\\n${config.rds.dbName}${config.rds.pgvector ? ' + pgvector' : ''}`,
+        scope: hasVpc ? 'private-subnet' : 'regional',
       });
-      if (config.rds.proxy !== false) {
-        nodes.push({
-          id: 'rds_proxy',
-          importPath: 'diagrams.aws.database',
-          className: 'RDS',
-          label: 'RDS Proxy\\n(TLS)',
-          cluster: 'data',
-        });
-      }
     } else {
       nodes.push({
         id: 'rds_instance',
-        importPath: 'diagrams.aws.database',
+        importModule: 'diagrams.aws.database',
         className: 'RDS',
-        label: `RDS PostgreSQL\\n${config.rds.engineVersion ?? '15'}\\n${config.rds.dbName}`,
-        cluster: 'data',
+        label: `RDS PostgreSQL ${config.rds.engineVersion ?? '15'}\\n${config.rds.dbName}\\n${config.rds.instanceClass ?? 'db.t4g.micro'}`,
+        scope: hasVpc ? 'private-subnet' : 'regional',
       });
     }
   }
 
-  // DynamoDB tables
+  // DynamoDB is regional (serverless, no VPC)
   if (config.dynamodb?.length) {
-    const tableNames = config.dynamodb.map(t => t.name.replace(`${app}-`, '')).join('\\n');
+    const tableNames = config.dynamodb
+      .map(t => t.name.replace(`${app}-`, ''))
+      .slice(0, 5)  // Cap at 5 to keep label readable
+      .join(', ');
+    const extra = config.dynamodb.length > 5 ? ` +${config.dynamodb.length - 5} more` : '';
     nodes.push({
       id: 'dynamodb',
-      importPath: 'diagrams.aws.database',
+      importModule: 'diagrams.aws.database',
       className: 'Dynamodb',
-      label: `DynamoDB\\n(${config.dynamodb.length} Tables)\\n${tableNames}`,
-      cluster: 'data',
-    });
-  }
-
-  // S3 buckets
-  for (const bucket of config.s3 ?? []) {
-    const shortName = bucket.name
-      .replace(`${app}-`, '')
-      .replace('{account}-{region}', '')
-      .replace(/-$/, '') || 'data';
-    const idSafe = shortName.replace(/[^a-zA-Z0-9]/g, '_');
-    nodes.push({
-      id: `s3_${idSafe}`,
-      importPath: 'diagrams.aws.storage',
-      className: 'S3',
-      label: `S3\\n(${shortName})`,
-      cluster: 'data',
-    });
-  }
-
-  // Cognito
-  if (config.cognito) {
-    const authMethods: string[] = [];
-    if (config.cognito.emailSignup) authMethods.push('Email/Password');
-    if (config.cognito.appleSignIn) authMethods.push('Apple');
-    if (config.cognito.googleSignIn) authMethods.push('Google');
-    nodes.push({
-      id: 'cognito',
-      importPath: 'diagrams.aws.security',
-      className: 'Cognito',
-      label: `Cognito User Pool\\n(${authMethods.join(' + ') || 'Email/Password'})`,
-      cluster: 'control',
-    });
-  }
-
-  // ECR + ECS Express
-  for (const ecs of config.ecsExpress ?? []) {
-    nodes.push({
-      id: `ecs_${ecs.name.replace(/[^a-zA-Z0-9]/g, '_')}`,
-      importPath: 'diagrams.aws.compute',
-      className: 'ECS',
-      label: `ECS Express Mode\\n${ecs.name}\\n(${ecs.cpu ?? 512} CPU / ${ecs.memory ?? 1024} MB)`,
-      cluster: 'app',
-    });
-  }
-
-  for (const ecr of config.ecr ?? []) {
-    nodes.push({
-      id: `ecr_${ecr.name.replace(/[^a-zA-Z0-9]/g, '_')}`,
-      importPath: 'diagrams.aws.compute',
-      className: 'ECS',
-      label: `ECR\\n${ecr.name}`,
-      cluster: 'control',
-    });
-  }
-
-  // EventBridge
-  if (config.eventbridge?.length) {
-    nodes.push({
-      id: 'eventbridge',
-      importPath: 'diagrams.aws.integration',
-      className: 'Eventbridge',
-      label: `EventBridge\\n(${config.eventbridge.length} Rules)`,
-      cluster: 'control',
-    });
-  }
-
-  // Always add CloudWatch and Secrets Manager
-  nodes.push({
-    id: 'cloudwatch',
-    importPath: 'diagrams.aws.management',
-    className: 'Cloudwatch',
-    label: 'CloudWatch Logs',
-    cluster: 'control',
-  });
-
-  if (config.rds) {
-    nodes.push({
-      id: 'secrets',
-      importPath: 'diagrams.aws.security',
-      className: 'SecretsManager',
-      label: 'Secrets Manager',
-      cluster: 'control',
+      label: `DynamoDB\\n${config.dynamodb.length} Table${config.dynamodb.length > 1 ? 's' : ''}\\n${tableNames}${extra}`,
+      scope: 'regional',
     });
   }
 
@@ -188,236 +248,372 @@ function buildNodes(config: ForgeConfig): DiagramNode[] {
 }
 
 // ---------------------------------------------------------------------------
-// Build edges (connections between resources)
+// Build edges with numbered callouts
 // ---------------------------------------------------------------------------
-
-interface DiagramEdge {
-  from: string;
-  to: string;
-  label?: string;
-  color?: string;
-  style?: string;
-}
 
 function buildEdges(config: ForgeConfig, nodes: DiagramNode[]): DiagramEdge[] {
   const edges: DiagramEdge[] = [];
   const nodeIds = new Set(nodes.map(n => n.id));
   const has = (id: string) => nodeIds.has(id);
+  let callout = 1;
 
-  // Users → Cognito (auth)
+  // 1. Users → Cognito (authentication)
   if (has('cognito')) {
-    edges.push({ from: 'users', to: 'cognito', label: 'Auth', color: '#8E44AD', style: 'dashed' });
+    edges.push({
+      from: 'users', to: 'cognito',
+      label: `${callout}. Authenticate`,
+      color: EDGE_COLORS.auth, style: 'dashed', callout: callout++,
+    });
   }
 
-  // Users → API Gateway or ECS Express
+  // 2. Users → API Gateway (API requests)
   if (has('apigw')) {
-    edges.push({ from: 'users', to: 'apigw', label: 'API (JWT)', color: '#E74C3C' });
+    edges.push({
+      from: 'users', to: 'apigw',
+      label: `${callout}. API Request (JWT)`,
+      color: EDGE_COLORS.api, style: 'solid', callout: callout++,
+    });
   }
+
+  // 2b. Users → ECS Express (HTTPS)
   for (const ecs of config.ecsExpress ?? []) {
     const ecsId = `ecs_${ecs.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
     if (has(ecsId)) {
-      edges.push({ from: 'users', to: ecsId, label: 'HTTPS', color: '#1ABC9C' });
+      edges.push({
+        from: 'users', to: ecsId,
+        label: `${callout}. HTTPS`,
+        color: EDGE_COLORS.cdn, style: 'solid', callout: callout++,
+      });
     }
   }
 
-  // API Gateway → Lambda functions
+  // 3. API Gateway → Lambda functions
   for (const fn of config.lambda ?? []) {
     const lambdaId = `lambda_${fn.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
     if (has('apigw') && has(lambdaId)) {
-      edges.push({ from: 'apigw', to: lambdaId });
+      edges.push({
+        from: 'apigw', to: lambdaId,
+        color: EDGE_COLORS.data, style: 'solid',
+      });
     }
   }
 
-  // Lambda → RDS Proxy → Aurora (or Lambda → RDS directly)
-  const firstLambda = config.lambda?.[0];
-  if (firstLambda) {
-    const firstLambdaId = `lambda_${firstLambda.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+  // 4. Lambda → RDS Proxy → Aurora (data path)
+  const primaryLambda = config.lambda?.[0];
+  if (primaryLambda) {
+    const primaryId = `lambda_${primaryLambda.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+
     if (has('rds_proxy') && has('aurora')) {
-      edges.push({ from: firstLambdaId, to: 'rds_proxy' });
-      edges.push({ from: 'rds_proxy', to: 'aurora' });
+      edges.push({ from: primaryId, to: 'rds_proxy', color: EDGE_COLORS.data, style: 'solid' });
+      edges.push({ from: 'rds_proxy', to: 'aurora', color: EDGE_COLORS.data, style: 'solid' });
     } else if (has('aurora')) {
-      edges.push({ from: firstLambdaId, to: 'aurora' });
+      edges.push({ from: primaryId, to: 'aurora', color: EDGE_COLORS.data, style: 'solid' });
     } else if (has('rds_instance')) {
-      edges.push({ from: firstLambdaId, to: 'rds_instance' });
+      edges.push({ from: primaryId, to: 'rds_instance', color: EDGE_COLORS.data, style: 'solid' });
     }
 
     // Lambda → DynamoDB
     if (has('dynamodb')) {
-      edges.push({ from: firstLambdaId, to: 'dynamodb' });
+      edges.push({ from: primaryId, to: 'dynamodb', color: EDGE_COLORS.data, style: 'solid' });
     }
 
-    // Lambda → CloudWatch (dotted)
-    if (has('cloudwatch')) {
-      edges.push({ from: firstLambdaId, to: 'cloudwatch', color: '#95A5A6', style: 'dotted' });
-    }
-
-    // Lambda → Secrets Manager (dotted)
-    if (has('secrets')) {
-      edges.push({ from: firstLambdaId, to: 'secrets', color: '#95A5A6', style: 'dotted' });
-    }
-  }
-
-  // ECS Express → DynamoDB / S3
-  for (const ecs of config.ecsExpress ?? []) {
-    const ecsId = `ecs_${ecs.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
-    if (has('dynamodb')) {
-      edges.push({ from: ecsId, to: 'dynamodb' });
-    }
-    for (const s3 of config.s3 ?? []) {
-      const s3Id = `s3_${(s3.name.replace(`${config.app}-`, '').replace('{account}-{region}', '').replace(/-$/, '') || 'data').replace(/[^a-zA-Z0-9]/g, '_')}`;
+    // Lambda → S3
+    for (const bucket of config.s3 ?? []) {
+      const shortName = bucket.name.replace(`${config.app}-`, '').replace(/\{account\}-?\{region\}/, '').replace(/-$/, '').replace(/^-/, '') || 'data';
+      const s3Id = `s3_${shortName.replace(/[^a-zA-Z0-9]/g, '_')}`;
       if (has(s3Id)) {
-        edges.push({ from: ecsId, to: s3Id });
+        edges.push({ from: primaryId, to: s3Id, color: EDGE_COLORS.data, style: 'solid' });
       }
     }
-    if (has('cloudwatch')) {
-      edges.push({ from: ecsId, to: 'cloudwatch', color: '#95A5A6', style: 'dotted' });
+  }
+
+  // ECS Express → data stores
+  for (const ecs of config.ecsExpress ?? []) {
+    const ecsId = `ecs_${ecs.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    if (!has(ecsId)) continue;
+
+    if (has('dynamodb')) {
+      edges.push({ from: ecsId, to: 'dynamodb', color: EDGE_COLORS.data, style: 'solid' });
+    }
+    if (has('rds_proxy')) {
+      edges.push({ from: ecsId, to: 'rds_proxy', color: EDGE_COLORS.data, style: 'solid' });
+    } else if (has('aurora')) {
+      edges.push({ from: ecsId, to: 'aurora', color: EDGE_COLORS.data, style: 'solid' });
+    }
+    for (const bucket of config.s3 ?? []) {
+      const shortName = bucket.name.replace(`${config.app}-`, '').replace(/\{account\}-?\{region\}/, '').replace(/-$/, '').replace(/^-/, '') || 'data';
+      const s3Id = `s3_${shortName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      if (has(s3Id)) {
+        edges.push({ from: ecsId, to: s3Id, color: EDGE_COLORS.data, style: 'solid' });
+      }
     }
   }
 
-  // ECR → ECS Express (deploy)
+  // ECR → ECS Express (deploy pipeline)
   for (const ecr of config.ecr ?? []) {
     const ecrId = `ecr_${ecr.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
     for (const ecs of config.ecsExpress ?? []) {
       const ecsId = `ecs_${ecs.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
       if (has(ecrId) && has(ecsId)) {
-        edges.push({ from: ecrId, to: ecsId, label: 'Deploy', color: '#F39C12', style: 'dashed' });
+        edges.push({ from: ecrId, to: ecsId, label: 'Deploy', color: EDGE_COLORS.deploy, style: 'dashed' });
       }
     }
   }
 
-  // EventBridge → Lambda (scheduler)
+  // EventBridge → Lambda (async/scheduled)
   if (has('eventbridge')) {
     for (const rule of config.eventbridge ?? []) {
       const targetId = `lambda_${rule.targetLambda.replace(/[^a-zA-Z0-9]/g, '_')}`;
       if (has(targetId)) {
-        edges.push({ from: 'eventbridge', to: targetId, label: 'Schedule', color: '#F39C12', style: 'dashed' });
+        edges.push({ from: 'eventbridge', to: targetId, label: rule.schedule ?? 'Event', color: EDGE_COLORS.async, style: 'dashed' });
       }
     }
+  }
+
+  // Cognito triggers → Lambda
+  if (config.cognito?.triggers) {
+    const triggers = config.cognito.triggers;
+    for (const fnName of [triggers.preTokenGeneration, triggers.postConfirmation, triggers.preSignUp].filter(Boolean) as string[]) {
+      const targetId = `lambda_${fnName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      if (has('cognito') && has(targetId)) {
+        edges.push({ from: 'cognito', to: targetId, label: 'Trigger', color: EDGE_COLORS.async, style: 'dashed' });
+      }
+    }
+  }
+
+  // Observability edges (dotted gray — secondary, don't clutter)
+  const computeNodes = nodes.filter(n =>
+    n.id.startsWith('lambda_') || n.id.startsWith('ecs_')
+  );
+  // Only connect the primary compute node to observability to avoid clutter
+  if (computeNodes.length > 0 && has('cloudwatch')) {
+    edges.push({ from: computeNodes[0].id, to: 'cloudwatch', color: EDGE_COLORS.observe, style: 'dotted' });
+  }
+  if (computeNodes.length > 0 && has('secrets')) {
+    edges.push({ from: computeNodes[0].id, to: 'secrets', color: EDGE_COLORS.observe, style: 'dotted' });
   }
 
   return edges;
 }
 
 // ---------------------------------------------------------------------------
-// Generate Python script
+// Python script generation — AWS-standard boundary grouping
 // ---------------------------------------------------------------------------
 
-function generatePythonScript(config: ForgeConfig, outputFile: string): string {
+function generatePythonScript(
+  config: ForgeConfig,
+  outputFile: string,
+  orientation: DiagramOrientation
+): string {
   const nodes = buildNodes(config);
   const edges = buildEdges(config, nodes);
+  const hasVpc = !!config.vpc;
+  const isLandscape = orientation === 'landscape';
 
-  // Collect unique imports
+  // Collect imports
   const imports = new Map<string, Set<string>>();
   imports.set('diagrams', new Set(['Diagram', 'Cluster', 'Edge']));
   imports.set('diagrams.aws.general', new Set(['Users']));
   for (const node of nodes) {
-    if (!imports.has(node.importPath)) imports.set(node.importPath, new Set());
-    imports.get(node.importPath)!.add(node.className);
+    if (!imports.has(node.importModule)) imports.set(node.importModule, new Set());
+    imports.get(node.importModule)!.add(node.className);
   }
 
-  const lines: string[] = [];
-  lines.push('#!/usr/bin/env python3');
-  lines.push('"""Auto-generated by forge diagram. Do not edit."""');
-  lines.push('');
+  const L: string[] = [];  // lines
+  L.push('#!/usr/bin/env python3');
+  L.push('"""');
+  L.push(`${config.app} — AWS Architecture Diagram`);
+  L.push('Auto-generated by forge diagram. Follows AWS Architecture Diagram Guidelines.');
+  L.push('"""');
+  L.push('');
 
-  // Imports
-  for (const [path, classes] of imports) {
-    lines.push(`from ${path} import ${[...classes].join(', ')}`);
+  for (const [mod, classes] of imports) {
+    L.push(`from ${mod} import ${[...classes].join(', ')}`);
   }
-  lines.push('');
+  L.push('');
 
-  // Style constants (matching Alchemaize Catalyst style)
-  lines.push('ACCOUNT_BOX = {');
-  lines.push('    "bgcolor": "#F7F9FA", "style": "rounded", "pencolor": "#232F3E",');
-  lines.push('    "penwidth": "2.5", "fontsize": "13", "fontname": "Helvetica-Bold", "fontcolor": "#232F3E",');
-  lines.push('}');
-  lines.push('APP_PLANE = {');
-  lines.push('    "bgcolor": "#E8F8F5", "style": "rounded", "pencolor": "#1ABC9C",');
-  lines.push('    "penwidth": "2", "fontsize": "14", "fontname": "Helvetica-Bold", "fontcolor": "#117A65",');
-  lines.push('}');
-  lines.push('DATA_PLANE = {');
-  lines.push('    "bgcolor": "#FEF9E7", "style": "rounded", "pencolor": "#F39C12",');
-  lines.push('    "penwidth": "2", "fontsize": "14", "fontname": "Helvetica-Bold", "fontcolor": "#7D6608",');
-  lines.push('}');
-  lines.push('CTRL_PLANE = {');
-  lines.push('    "bgcolor": "#EBF5FB", "style": "rounded", "pencolor": "#2E86C1",');
-  lines.push('    "penwidth": "2", "fontsize": "14", "fontname": "Helvetica-Bold", "fontcolor": "#1A5276",');
-  lines.push('}');
-  lines.push('');
+  // ── Style constants ──
+  // AWS uses #232F3E (Squid Ink) as the primary dark color
+  // Boundary boxes follow the AWS icon set color conventions
+  L.push('# AWS Architecture Diagram style constants');
+  L.push('# Colors from the official AWS Architecture Icon set');
+  L.push('CLOUD_BOX = {');
+  L.push('    "bgcolor": "#FAFAFA",');
+  L.push('    "style": "rounded",');
+  L.push('    "pencolor": "#232F3E",');
+  L.push('    "penwidth": "2.5",');
+  L.push('    "fontsize": "18",');
+  L.push('    "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",');
+  L.push('    "fontcolor": "#232F3E",');
+  L.push('}');
+  L.push('');
+  L.push('REGION_BOX = {');
+  L.push('    "bgcolor": "#F2F8FD",');
+  L.push('    "style": "rounded",');
+  L.push('    "pencolor": "#147EBA",');
+  L.push('    "penwidth": "2",');
+  L.push('    "fontsize": "16",');
+  L.push('    "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",');
+  L.push('    "fontcolor": "#147EBA",');
+  L.push('}');
+  L.push('');
+  L.push('VPC_BOX = {');
+  L.push('    "bgcolor": "#E8F5E9",');
+  L.push('    "style": "rounded",');
+  L.push('    "pencolor": "#1B660F",');
+  L.push('    "penwidth": "2",');
+  L.push('    "fontsize": "15",');
+  L.push('    "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",');
+  L.push('    "fontcolor": "#1B660F",');
+  L.push('}');
+  L.push('');
+  L.push('PUBLIC_SUBNET = {');
+  L.push('    "bgcolor": "#E8F8F5",');
+  L.push('    "style": "rounded",');
+  L.push('    "pencolor": "#1ABC9C",');
+  L.push('    "penwidth": "1.5",');
+  L.push('    "fontsize": "13",');
+  L.push('    "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",');
+  L.push('    "fontcolor": "#117A65",');
+  L.push('}');
+  L.push('');
+  L.push('PRIVATE_SUBNET = {');
+  L.push('    "bgcolor": "#EBF5FB",');
+  L.push('    "style": "rounded",');
+  L.push('    "pencolor": "#2E86C1",');
+  L.push('    "penwidth": "1.5",');
+  L.push('    "fontsize": "13",');
+  L.push('    "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",');
+  L.push('    "fontcolor": "#1A5276",');
+  L.push('}');
+  L.push('');
 
-  // Remove .png extension from output for diagrams library (it adds it)
+  // ── Diagram setup ──
   const outBase = outputFile.replace(/\.png$/, '');
-  const title = `${config.app} — Architecture Diagram  |  Alchemaize, Inc.  |  AWS Account (${config.region ?? 'us-east-1'})`;
+  const direction = isLandscape ? 'LR' : 'TB';
+  const size = isLandscape ? '28,16!' : '18,28!';
+  const ratio = isLandscape ? '0.56' : '0.65';
+  const title = `${config.app}  \\u2014  AWS Architecture  |  Alchemaize, Inc.`;
 
-  lines.push(`with Diagram(`);
-  lines.push(`    "",`);
-  lines.push(`    filename="${outBase}",`);
-  lines.push(`    show=False,`);
-  lines.push(`    direction="TB",`);
-  lines.push(`    outformat="png",`);
-  lines.push(`    graph_attr={`);
-  lines.push(`        "fontsize": "22", "fontname": "Helvetica-Bold", "bgcolor": "white",`);
-  lines.push(`        "pad": "0.6", "nodesep": "1.0", "ranksep": "0.9", "dpi": "150",`);
-  lines.push(`        "labelloc": "t", "labeljust": "c", "ratio": "0.6", "size": "24,14!",`);
-  lines.push(`        "label": "${title}",`);
-  lines.push(`    },`);
-  lines.push(`    edge_attr={"color": "#545B64", "penwidth": "1.3"},`);
-  lines.push(`    node_attr={"fontsize": "10", "fontname": "Helvetica", "width": "1.8", "height": "1.8"},`);
-  lines.push(`):`);
+  L.push(`with Diagram(`);
+  L.push(`    "",`);
+  L.push(`    filename="${outBase}",`);
+  L.push(`    show=False,`);
+  L.push(`    direction="${direction}",`);
+  L.push(`    outformat="png",`);
+  L.push(`    graph_attr={`);
+  L.push(`        "fontsize": "24",`);
+  L.push(`        "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",`);
+  L.push(`        "bgcolor": "white",`);
+  L.push(`        "pad": "0.8",`);
+  L.push(`        "nodesep": "0.8",`);
+  L.push(`        "ranksep": "1.0",`);
+  L.push(`        "dpi": "200",`);
+  L.push(`        "labelloc": "t",`);
+  L.push(`        "labeljust": "c",`);
+  L.push(`        "ratio": "${ratio}",`);
+  L.push(`        "size": "${size}",`);
+  L.push(`        "label": "${title}",`);
+  L.push(`        "fontcolor": "#232F3E",`);
+  L.push(`    },`);
+  L.push(`    edge_attr={`);
+  L.push(`        "color": "#545B64",`);
+  L.push(`        "penwidth": "1.5",`);
+  L.push(`        "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",`);
+  L.push(`        "fontsize": "11",`);
+  L.push(`        "fontcolor": "#545B64",`);
+  L.push(`    },`);
+  L.push(`    node_attr={`);
+  L.push(`        "fontsize": "12",`);
+  L.push(`        "fontname": "Helvetica Neue,Helvetica,Arial,sans-serif",`);
+  L.push(`        "fontcolor": "#232F3E",`);
+  L.push(`        "width": "2.0",`);
+  L.push(`        "height": "2.0",`);
+  L.push(`    },`);
+  L.push(`):`);
+  L.push('');
 
-  // Users node
-  lines.push(`    users = Users("Users")`);
-  lines.push('');
+  // ── Users (external) ──
+  L.push('    users = Users("Users")');
+  L.push('');
 
-  // Account cluster
-  lines.push(`    with Cluster("AWS Account (${config.region ?? 'us-east-1'})  —  Profile: ${config.profile}", graph_attr=ACCOUNT_BOX):`);
+  // ── AWS Cloud boundary ──
+  const region = config.region ?? 'us-east-1';
+  L.push(`    with Cluster("AWS Cloud", graph_attr=CLOUD_BOX):`);
+  L.push(`        with Cluster("Region: ${region}", graph_attr=REGION_BOX):`);
+  L.push('');
 
-  // Application Plane
-  const appNodes = nodes.filter(n => n.cluster === 'app');
-  if (appNodes.length > 0) {
-    lines.push(`        with Cluster("APPLICATION PLANE", graph_attr=APP_PLANE):`);
-    for (const node of appNodes) {
-      lines.push(`            ${node.id} = ${node.className}("${node.label}")`);
+  // Regional services (outside VPC)
+  const regionalNodes = nodes.filter(n => n.scope === 'regional');
+  if (regionalNodes.length > 0) {
+    L.push('            # Regional services');
+    for (const node of regionalNodes) {
+      L.push(`            ${node.id} = ${node.className}("${node.label}")`);
+    }
+    L.push('');
+  }
+
+  // VPC boundary (if applicable)
+  const vpcNodes = nodes.filter(n =>
+    n.scope === 'vpc' || n.scope === 'public-subnet' || n.scope === 'private-subnet'
+  );
+
+  if (hasVpc && vpcNodes.length > 0) {
+    const vpcCidr = config.vpc?.cidr ?? (config.vpc?.vpcId ?? '');
+    const vpcLabel = config.vpc?.mode === 'lookup'
+      ? `VPC (${config.vpc.vpcId})`
+      : `VPC (${vpcCidr})`;
+
+    L.push(`            with Cluster("${vpcLabel}", graph_attr=VPC_BOX):`);
+
+    // Public subnet nodes
+    const publicNodes = vpcNodes.filter(n => n.scope === 'public-subnet');
+    if (publicNodes.length > 0) {
+      L.push(`                with Cluster("Public Subnets", graph_attr=PUBLIC_SUBNET):`);
+      for (const node of publicNodes) {
+        L.push(`                    ${node.id} = ${node.className}("${node.label}")`);
+      }
+      L.push('');
+    }
+
+    // Private subnet nodes
+    const privateNodes = vpcNodes.filter(n => n.scope === 'private-subnet');
+    if (privateNodes.length > 0) {
+      L.push(`                with Cluster("Private Subnets", graph_attr=PRIVATE_SUBNET):`);
+      for (const node of privateNodes) {
+        L.push(`                    ${node.id} = ${node.className}("${node.label}")`);
+      }
+      L.push('');
+    }
+
+    // Generic VPC nodes (no specific subnet)
+    const genericVpcNodes = vpcNodes.filter(n => n.scope === 'vpc');
+    for (const node of genericVpcNodes) {
+      L.push(`                ${node.id} = ${node.className}("${node.label}")`);
+    }
+  } else if (vpcNodes.length > 0) {
+    // No VPC config but some nodes are VPC-scoped — just place them in region
+    for (const node of vpcNodes) {
+      L.push(`            ${node.id} = ${node.className}("${node.label}")`);
     }
   }
 
-  // Data Plane
-  const dataNodes = nodes.filter(n => n.cluster === 'data');
-  if (dataNodes.length > 0) {
-    lines.push(`        with Cluster("DATA PLANE", graph_attr=DATA_PLANE):`);
-    for (const node of dataNodes) {
-      lines.push(`            ${node.id} = ${node.className}("${node.label}")`);
-    }
-  }
+  L.push('');
 
-  // Control Plane
-  const controlNodes = nodes.filter(n => n.cluster === 'control');
-  if (controlNodes.length > 0) {
-    lines.push(`        with Cluster("CONTROL PLANE", graph_attr=CTRL_PLANE):`);
-    for (const node of controlNodes) {
-      lines.push(`            ${node.id} = ${node.className}("${node.label}")`);
-    }
-  }
-
-  lines.push('');
-
-  // Edges
+  // ── Edges ──
+  L.push('    # Data flow');
   for (const edge of edges) {
-    const edgeArgs: string[] = [];
-    if (edge.label) edgeArgs.push(`label="${edge.label}"`);
-    if (edge.color) edgeArgs.push(`color="${edge.color}"`);
-    if (edge.style) edgeArgs.push(`style="${edge.style}"`);
-    edgeArgs.push('fontsize="9"');
+    const args: string[] = [];
+    if (edge.label) args.push(`label="${edge.label}"`);
+    args.push(`color="${edge.color}"`);
+    if (edge.style !== 'solid') args.push(`style="${edge.style}"`);
+    args.push(`fontsize="10"`);
 
-    if (edgeArgs.length > 1) {
-      lines.push(`    ${edge.from} >> Edge(${edgeArgs.join(', ')}) >> ${edge.to}`);
-    } else {
-      lines.push(`    ${edge.from} >> ${edge.to}`);
-    }
+    L.push(`    ${edge.from} >> Edge(${args.join(', ')}) >> ${edge.to}`);
   }
 
-  lines.push('');
-  return lines.join('\n');
+  L.push('');
+  return L.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -426,10 +622,11 @@ function generatePythonScript(config: ForgeConfig, outputFile: string): string {
 
 export async function generateDiagram(
   config: ForgeConfig,
-  outputPath?: string
+  outputPath?: string,
+  orientation: DiagramOrientation = 'landscape'
 ): Promise<string> {
   const outFile = outputPath ?? `${config.app}-architecture.png`;
-  const tmpScript = `/tmp/forge-diagram-${config.app}.py`;
+  const tmpScript = `/tmp/forge-diagram-${config.app}-${Date.now()}.py`;
 
   console.log(`\nForge: generating architecture diagram for '${config.app}'\n`);
 
@@ -439,27 +636,43 @@ export async function generateDiagram(
   } catch {
     throw new Error(
       'Python diagrams library not found.\n' +
-      'Install it: pip3 install diagrams\n' +
+      'Install: pip3 install diagrams\n' +
       'Also requires Graphviz: brew install graphviz'
     );
   }
 
-  // Generate and write Python script
-  const script = generatePythonScript(config, outFile);
-  writeFileSync(tmpScript, script, 'utf-8');
+  // Count resources
+  const counts = {
+    lambda: config.lambda?.length ?? 0,
+    dynamodb: config.dynamodb?.length ?? 0,
+    s3: config.s3?.length ?? 0,
+    ecr: config.ecr?.length ?? 0,
+    ecs: config.ecsExpress?.length ?? 0,
+    eventbridge: config.eventbridge?.length ?? 0,
+  };
+  const features = [
+    config.cognito ? 'Cognito' : '',
+    config.rds ? (config.rds.mode === 'aurora-serverless-v2' ? 'Aurora' : 'RDS') : '',
+    config.rds?.proxy !== false && config.rds?.mode === 'aurora-serverless-v2' ? 'Proxy' : '',
+    config.apiGateway ? 'API GW' : '',
+    config.vpc ? 'VPC' : '',
+  ].filter(Boolean);
 
-  console.log(`  Resources: ${(config.lambda?.length ?? 0)} Lambda, ${(config.dynamodb?.length ?? 0)} DynamoDB, ${(config.s3?.length ?? 0)} S3, ${(config.ecr?.length ?? 0)} ECR, ${(config.ecsExpress?.length ?? 0)} ECS`);
-  console.log(`  Config: ${config.cognito ? 'Cognito' : ''}${config.rds ? ' + RDS' : ''}${config.apiGateway ? ' + API GW' : ''}${config.vpc ? ' + VPC' : ''}`);
+  console.log(`  Orientation: ${orientation}`);
+  console.log(`  Resources:   ${counts.lambda} Lambda, ${counts.dynamodb} DynamoDB, ${counts.s3} S3, ${counts.ecr} ECR, ${counts.ecs} ECS, ${counts.eventbridge} EventBridge`);
+  console.log(`  Services:    ${features.join(', ')}`);
   console.log('');
 
-  // Run the script
+  // Generate Python script
+  const script = generatePythonScript(config, outFile, orientation);
+  writeFileSync(tmpScript, script, 'utf-8');
+
+  // Run it
   try {
-    execSync(`python3 '${tmpScript}'`, {
-      stdio: 'inherit',
-      cwd: process.cwd(),
-    });
-  } catch (err: any) {
-    throw new Error(`Diagram generation failed. Check the Python script at ${tmpScript}`);
+    execSync(`python3 '${tmpScript}'`, { stdio: 'inherit', cwd: process.cwd() });
+  } catch {
+    console.error(`  Script saved at: ${tmpScript}`);
+    throw new Error('Diagram generation failed. Check the Python script for errors.');
   }
 
   // Cleanup

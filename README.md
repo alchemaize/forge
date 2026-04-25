@@ -123,11 +123,25 @@ Discovery strategy:
 
 ### `forge diagram`
 
-Generate an architecture diagram (PNG) from your forge config. Uses the Python `diagrams` library with the Alchemaize Catalyst visual style — Application Plane, Data Plane, and Control Plane clusters.
+Generate a professional AWS architecture diagram (PNG) from your forge config. Follows the [AWS Architecture Diagram Guidelines](https://aws.amazon.com/architecture/icons/):
+
+- Official AWS icon set via the `diagrams` Python library
+- Proper boundary grouping: AWS Cloud → Region → VPC → Public/Private Subnets
+- Service scope awareness: S3, Cognito, DynamoDB are regional (outside VPC); Lambda, RDS Proxy, Aurora are VPC-scoped (inside VPC when configured)
+- Numbered callouts on data flow edges
+- Consistent edge colors: purple=auth, red=API, orange=async, green=deploy, gray=observability
+- Large readable fonts (12pt nodes, 16pt clusters, 24pt title) at 200 DPI
+- Landscape (default) and portrait orientation
 
 ```bash
+# Landscape (default) — best for presentations and docs
 forge diagram --config myapp.forge.config.ts
-forge diagram --config myapp.forge.config.ts --output myapp-architecture.png
+
+# Portrait — best for README files and vertical layouts
+forge diagram --config myapp.forge.config.ts --portrait
+
+# Custom output path
+forge diagram --config myapp.forge.config.ts --output docs/architecture.png
 ```
 
 Prerequisites:
@@ -135,8 +149,6 @@ Prerequisites:
 pip3 install diagrams
 brew install graphviz
 ```
-
-The diagram is generated automatically from your config — no hand-coding. It maps each resource to the correct AWS icon, groups them into planes, and draws the connections (API GW → Lambda → RDS Proxy → Aurora, Users → Cognito, etc.).
 
 ### `forge destroy`
 

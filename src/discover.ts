@@ -636,7 +636,9 @@ export async function discoverApp(
   lines.push(` * Forge will NOT delete or recreate existing resources — it adopts them in place.`);
   lines.push(` */`);
   lines.push(``);
-  lines.push(`import { defineConfig } from '@alchemaize/forge';`);
+  lines.push(`import { defineConfig } from './src/config.js';`);
+  lines.push(`// If using from outside the forge directory, change to:`);
+  lines.push(`// import { defineConfig } from '<path-to-forge>/src/config.js';`);
   lines.push(``);
   lines.push(`export default defineConfig({`);
   lines.push(`  app: '${appName}',`);

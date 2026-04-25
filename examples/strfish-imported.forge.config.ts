@@ -8,7 +8,7 @@
  * Forge will NOT delete or recreate existing resources — it adopts them in place.
  */
 
-import { defineConfig } from '@alchemaize/forge';
+import { defineConfig } from '../src/config.js';
 
 export default defineConfig({
   app: 'strfish',

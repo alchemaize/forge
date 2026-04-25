@@ -47,6 +47,9 @@ Usage:
 Options:
   --config <path>                Config file (default: ./forge.config.ts)
   --confirm-data-loss            Required for destroying data-tier resources
+  --landscape                    Diagram orientation (default)
+  --portrait                     Diagram in portrait orientation
+  --output <path>                Output file path
 
 Import options:
   --stack <name>                 CloudFormation stack name (required)
@@ -143,8 +146,9 @@ Examples:
     case 'diagram': {
       const outputIdx2 = args.indexOf('--output');
       const diagramOutput = outputIdx2 >= 0 ? args[outputIdx2 + 1] : undefined;
+      const orientation = args.includes('--portrait') ? 'portrait' as const : 'landscape' as const;
       const { generateDiagram } = await import('./diagram.js');
-      await generateDiagram(config, diagramOutput);
+      await generateDiagram(config, diagramOutput, orientation);
       break;
     }
 
