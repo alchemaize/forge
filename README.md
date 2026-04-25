@@ -26,16 +26,33 @@ Forge eliminates all of these by design.
 
 ## Install
 
+Clone the repo and link it globally:
+
+```bash
+git clone https://github.com/alchemaize/forge.git
+cd forge
+npm install
+npm link
+```
+
+That's it. `forge` is now available as a command from any directory:
+
+```bash
+forge --help
+forge status --config path/to/forge.config.ts
+```
+
+No build step required — the CLI runs TypeScript directly via tsx.
+
+### Updating
+
 ```bash
 cd forge
+git pull
 npm install
 ```
 
-Run via tsx (no build step needed for development):
-
-```bash
-npx tsx src/cli.ts --help
-```
+The global `forge` command automatically picks up changes since it's linked to the source directory.
 
 ## Commands
 
@@ -44,7 +61,7 @@ npx tsx src/cli.ts --help
 Show what would change without making any changes.
 
 ```bash
-npx tsx src/cli.ts plan --config path/to/forge.config.ts
+forge plan --config path/to/forge.config.ts
 ```
 
 ### `forge apply`
@@ -52,7 +69,7 @@ npx tsx src/cli.ts plan --config path/to/forge.config.ts
 Create or update resources to match your config.
 
 ```bash
-npx tsx src/cli.ts apply --config path/to/forge.config.ts
+forge apply --config path/to/forge.config.ts
 ```
 
 Resources are applied in dependency order:
@@ -69,7 +86,7 @@ Resources are applied in dependency order:
 Show the current state of all resources declared in your config.
 
 ```bash
-npx tsx src/cli.ts status --config path/to/forge.config.ts
+forge status --config path/to/forge.config.ts
 ```
 
 ### `forge import`
@@ -77,8 +94,8 @@ npx tsx src/cli.ts status --config path/to/forge.config.ts
 Generate a forge config from an existing CloudFormation stack. Reads every resource in the stack, queries live AWS for full details, and produces a complete typed config.
 
 ```bash
-npx tsx src/cli.ts import --stack YeonCrm --profile yeoncrm
-npx tsx src/cli.ts import --stack STRfish --profile strfish --output strfish.forge.config.ts
+forge import --stack YeonCrm --profile yeoncrm
+forge import --stack STRfish --profile strfish --output strfish.forge.config.ts
 ```
 
 What it does:
@@ -94,8 +111,8 @@ What it does:
 Generate a forge config by scanning a live AWS account. No CloudFormation stack required. Works with CLI-provisioned, console-created, or any other resources.
 
 ```bash
-npx tsx src/cli.ts discover --app aegistrader --profile aegis
-npx tsx src/cli.ts discover --app strfish --profile strfish --output strfish.forge.config.ts
+forge discover --app aegistrader --profile aegis
+forge discover --app strfish --profile strfish --output strfish.forge.config.ts
 ```
 
 Discovery strategy:
@@ -110,13 +127,13 @@ Tear down a specific resource. Safety tiers prevent accidental data loss.
 
 ```bash
 # Compute-tier resources — normal destroy
-npx tsx src/cli.ts destroy lambda:my-temp-function --config forge.config.ts
+forge destroy lambda:my-temp-function --config forge.config.ts
 
 # Data-tier resources — requires explicit flag
-npx tsx src/cli.ts destroy dynamodb:my-table --config forge.config.ts --confirm-data-loss
+forge destroy dynamodb:my-table --config forge.config.ts --confirm-data-loss
 
 # VPC, RDS, Cognito — always refused
-npx tsx src/cli.ts destroy vpc:my-vpc --config forge.config.ts
+forge destroy vpc:my-vpc --config forge.config.ts
 # Error: forge refuses to destroy VPC resources.
 ```
 
@@ -226,10 +243,10 @@ The migration is non-destructive. Forge adopts existing resources in place — n
 
 ```bash
 # If you have a CloudFormation stack:
-npx tsx src/cli.ts import --stack MyStack --profile myprofile
+forge import --stack MyStack --profile myprofile
 
 # If resources were created via CLI (no stack):
-npx tsx src/cli.ts discover --app myapp --profile myprofile
+forge discover --app myapp --profile myprofile
 ```
 
 **Step 2: Verify the generated config**
@@ -239,7 +256,7 @@ Review the output file. Check that all values match your expectations. Fix any `
 **Step 3: Run plan to confirm adoption**
 
 ```bash
-npx tsx src/cli.ts plan --config myapp.forge.config.ts
+forge plan --config myapp.forge.config.ts
 ```
 
 This should show all resources as "unchanged". If it shows creates, something in the config doesn't match the live state — fix the config.
