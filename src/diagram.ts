@@ -73,15 +73,20 @@ function buildNodes(config: ForgeConfig): DiagramNode[] {
   // --- Regional services (outside VPC) ---
 
   if (config.cognito) {
+    const cognitoConfigs = Array.isArray(config.cognito) ? config.cognito : [config.cognito];
+    const poolCount = cognitoConfigs.length;
     const methods: string[] = [];
-    if (config.cognito.emailSignup) methods.push('Email/Password');
-    if (config.cognito.appleSignIn) methods.push('Apple Sign In');
-    if (config.cognito.googleSignIn) methods.push('Google');
+    // Collect auth methods from all pools
+    for (const pool of cognitoConfigs) {
+      if (pool.emailSignup && !methods.includes('Email/Password')) methods.push('Email/Password');
+      if (pool.appleSignIn && !methods.includes('Apple Sign In')) methods.push('Apple Sign In');
+      if (pool.googleSignIn && !methods.includes('Google')) methods.push('Google');
+    }
     nodes.push({
       id: 'cognito',
       importModule: 'diagrams.aws.security',
       className: 'Cognito',
-      label: `Cognito User Pool\\n${methods.join(', ') || 'Email/Password'}`,
+      label: `Cognito\\n${poolCount} User Pool${poolCount > 1 ? 's' : ''}\\n${methods.join(', ') || 'Email/Password'}`,
       scope: 'regional',
     });
   }
@@ -157,6 +162,54 @@ function buildNodes(config: ForgeConfig): DiagramNode[] {
     });
   }
 
+  // CloudFront is regional (edge service)
+  for (const cf of config.cloudfront ?? []) {
+    const idSafe = cf.name.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `cloudfront_${idSafe}`,
+      importModule: 'diagrams.aws.network',
+      className: 'CloudFront',
+      label: `CloudFront\\n${cf.name}`,
+      scope: 'regional',
+    });
+  }
+
+  // Step Functions is regional
+  for (const sf of config.stepFunctions ?? []) {
+    const idSafe = sf.name.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `sfn_${idSafe}`,
+      importModule: 'diagrams.aws.integration',
+      className: 'StepFunctions',
+      label: `Step Functions\\n${sf.name.replace(`${app}-`, '')}\\n${sf.type ?? 'STANDARD'}`,
+      scope: 'regional',
+    });
+  }
+
+  // SQS is regional
+  for (const q of config.sqs ?? []) {
+    const idSafe = q.name.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `sqs_${idSafe}`,
+      importModule: 'diagrams.aws.integration',
+      className: 'SQS',
+      label: `SQS\\n${q.name.replace(`${app}-`, '')}`,
+      scope: 'regional',
+    });
+  }
+
+  // SNS is regional
+  for (const topic of config.sns ?? []) {
+    const idSafe = topic.name.replace(/[^a-zA-Z0-9]/g, '_');
+    nodes.push({
+      id: `sns_${idSafe}`,
+      importModule: 'diagrams.aws.integration',
+      className: 'SNS',
+      label: `SNS\\n${topic.displayName ?? topic.name.replace(`${app}-`, '')}`,
+      scope: 'regional',
+    });
+  }
+
   // --- VPC-scoped services ---
 
   // Lambda functions go in private subnets if VPC-enabled
@@ -226,6 +279,17 @@ function buildNodes(config: ForgeConfig): DiagramNode[] {
         scope: hasVpc ? 'private-subnet' : 'regional',
       });
     }
+  }
+
+  // ElastiCache Redis in isolated subnets
+  if (config.elasticache) {
+    nodes.push({
+      id: 'elasticache',
+      importModule: 'diagrams.aws.database',
+      className: 'ElastiCache',
+      label: `ElastiCache\\n${(config.elasticache.engine ?? 'Redis').charAt(0).toUpperCase() + (config.elasticache.engine ?? 'redis').slice(1)}\\n${config.elasticache.nodeType ?? 'cache.t3.micro'}${config.elasticache.transitEncryption !== false ? '\\nTLS + AUTH' : ''}`,
+      scope: hasVpc && config.elasticache.vpc !== false ? 'private-subnet' : 'regional',
+    });
   }
 
   // DynamoDB is regional (serverless, no VPC)
@@ -370,14 +434,78 @@ function buildEdges(config: ForgeConfig, nodes: DiagramNode[]): DiagramEdge[] {
     }
   }
 
-  // Cognito triggers → Lambda
-  if (config.cognito?.triggers) {
-    const triggers = config.cognito.triggers;
-    for (const fnName of [triggers.preTokenGeneration, triggers.postConfirmation, triggers.preSignUp].filter(Boolean) as string[]) {
-      const targetId = `lambda_${fnName.replace(/[^a-zA-Z0-9]/g, '_')}`;
-      if (has('cognito') && has(targetId)) {
-        edges.push({ from: 'cognito', to: targetId, label: 'Trigger', color: EDGE_COLORS.async, style: 'dashed' });
+  // Cognito triggers → Lambda (multi-pool aware)
+  if (config.cognito) {
+    const cognitoConfigs = Array.isArray(config.cognito) ? config.cognito : [config.cognito];
+    for (const pool of cognitoConfigs) {
+      if (pool.triggers) {
+        for (const fnName of [pool.triggers.preTokenGeneration, pool.triggers.postConfirmation, pool.triggers.preSignUp].filter(Boolean) as string[]) {
+          const targetId = `lambda_${fnName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+          if (has('cognito') && has(targetId)) {
+            edges.push({ from: 'cognito', to: targetId, label: 'Trigger', color: EDGE_COLORS.async, style: 'dashed' });
+          }
+        }
       }
+    }
+  }
+
+  // CloudFront → S3 (CDN serving static content)
+  for (const cf of config.cloudfront ?? []) {
+    const cfId = `cloudfront_${cf.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    if (!has(cfId)) continue;
+
+    // Users → CloudFront
+    edges.push({ from: 'users', to: cfId, label: 'HTTPS', color: EDGE_COLORS.cdn, style: 'solid' });
+
+    // CloudFront → S3 origin
+    if (cf.s3Origin) {
+      const originShort = cf.s3Origin
+        .replace(`${config.app}-`, '')
+        .replace(/\{account\}-?\{region\}/, '')
+        .replace(/-\d+$/, '')  // strip account ID suffix
+        .replace(/-$/, '')
+        .replace(/^-/, '') || 'data';
+      const s3Id = `s3_${originShort.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      if (has(s3Id)) {
+        edges.push({ from: cfId, to: s3Id, label: 'OAC', color: EDGE_COLORS.cdn, style: 'solid' });
+      }
+    }
+  }
+
+  // Step Functions → Lambda (invocations)
+  for (const sf of config.stepFunctions ?? []) {
+    const sfId = `sfn_${sf.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    if (!has(sfId)) continue;
+
+    // Find target Lambda by name match or DLQ reference
+    for (const fn of config.lambda ?? []) {
+      const lambdaId = `lambda_${fn.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      // Connect to Lambdas that share the app prefix (likely invoked by the state machine)
+      if (has(lambdaId) && fn.name.includes('title')) {
+        edges.push({ from: sfId, to: lambdaId, label: 'Invoke', color: EDGE_COLORS.async, style: 'solid' });
+      }
+    }
+
+    // Step Functions → SQS DLQ
+    if (sf.dlqName) {
+      const dlqId = `sqs_${sf.dlqName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      if (has(dlqId)) {
+        edges.push({ from: sfId, to: dlqId, label: 'Failed', color: EDGE_COLORS.api, style: 'dashed' });
+      }
+    }
+  }
+
+  // Lambda → ElastiCache (data path)
+  if (has('elasticache') && primaryLambda) {
+    const primaryId = `lambda_${primaryLambda.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    edges.push({ from: primaryId, to: 'elasticache', color: EDGE_COLORS.data, style: 'solid' });
+  }
+
+  // SNS ← CloudWatch (alarm actions)
+  for (const topic of config.sns ?? []) {
+    const snsId = `sns_${topic.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    if (has(snsId) && has('cloudwatch')) {
+      edges.push({ from: 'cloudwatch', to: snsId, label: 'Alarm', color: EDGE_COLORS.observe, style: 'dashed' });
     }
   }
 
@@ -649,17 +777,24 @@ export async function generateDiagram(
     ecr: config.ecr?.length ?? 0,
     ecs: config.ecsExpress?.length ?? 0,
     eventbridge: config.eventbridge?.length ?? 0,
+    cloudfront: config.cloudfront?.length ?? 0,
+    stepFunctions: config.stepFunctions?.length ?? 0,
+    sqs: config.sqs?.length ?? 0,
   };
+  const cognitoConfigs = config.cognito
+    ? (Array.isArray(config.cognito) ? config.cognito : [config.cognito])
+    : [];
   const features = [
-    config.cognito ? 'Cognito' : '',
+    cognitoConfigs.length ? `Cognito (${cognitoConfigs.length} pool${cognitoConfigs.length > 1 ? 's' : ''})` : '',
     config.rds ? (config.rds.mode === 'aurora-serverless-v2' ? 'Aurora' : 'RDS') : '',
     config.rds?.proxy !== false && config.rds?.mode === 'aurora-serverless-v2' ? 'Proxy' : '',
+    config.elasticache ? 'ElastiCache' : '',
     config.apiGateway ? 'API GW' : '',
     config.vpc ? 'VPC' : '',
   ].filter(Boolean);
 
   console.log(`  Orientation: ${orientation}`);
-  console.log(`  Resources:   ${counts.lambda} Lambda, ${counts.dynamodb} DynamoDB, ${counts.s3} S3, ${counts.ecr} ECR, ${counts.ecs} ECS, ${counts.eventbridge} EventBridge`);
+  console.log(`  Resources:   ${counts.lambda} Lambda, ${counts.dynamodb} DynamoDB, ${counts.s3} S3, ${counts.ecr} ECR, ${counts.ecs} ECS, ${counts.eventbridge} EventBridge, ${counts.cloudfront} CloudFront, ${counts.stepFunctions} StepFunctions, ${counts.sqs} SQS`);
   console.log(`  Services:    ${features.join(', ')}`);
   console.log('');
 
