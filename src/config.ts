@@ -45,6 +45,13 @@ export interface RdsConfig {
   dbName: string;
   /** Master username (default: {app}_admin) */
   masterUsername?: string;
+  /**
+   * Override the cluster identifier for Aurora or instance identifier for RDS.
+   * Default: {app}-aurora (Aurora) or {app}-db (instance).
+   * Use this when adopting CDK-created resources with non-standard names
+   * (e.g. 'txdmvrtsdemo-auroracluster23d869c0-sg0iubt71cmf').
+   */
+  clusterId?: string;
   /** Instance class for standard mode (default: db.t4g.micro) */
   instanceClass?: string;
   /** Min ACU for serverless (default: 0.5) */
@@ -96,6 +103,16 @@ export interface CognitoConfig {
   emailSender?: string;
   /** Custom domain prefix */
   domainPrefix?: string;
+  /** Password policy */
+  passwordPolicy?: {
+    minLength?: number;
+    requireLowercase?: boolean;
+    requireUppercase?: boolean;
+    requireDigits?: boolean;
+    requireSymbols?: boolean;
+  };
+  /** MFA setting */
+  mfa?: 'OFF' | 'OPTIONAL' | 'REQUIRED';
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +318,162 @@ export interface SsmParameterConfig {
 export interface SnsTopicConfig {
   name: string;
   platform?: 'APNS' | 'GCM';
+  /** Display name for email subscriptions */
+  displayName?: string;
+}
+
+// ---------------------------------------------------------------------------
+// CloudFront
+// ---------------------------------------------------------------------------
+
+export interface CloudFrontDistributionConfig {
+  /** Logical name for this distribution (used in status/plan output) */
+  name: string;
+  /** S3 bucket origin (resolved from s3 config if name matches) */
+  s3Origin?: string;
+  /** Custom origin (ALB, ECS Express, API Gateway, etc.) */
+  customOrigin?: string;
+  /** Default root object (default: index.html) */
+  defaultRootObject?: string;
+  /** Viewer protocol policy (default: redirect-to-https) */
+  viewerProtocolPolicy?: 'allow-all' | 'https-only' | 'redirect-to-https';
+  /** SPA error responses — map 403/404 to /index.html */
+  spaErrorResponses?: boolean;
+  /** Custom domain aliases */
+  aliases?: string[];
+  /** ACM certificate ARN (required if aliases are set) */
+  certificateArn?: string;
+  /** WAF Web ACL ARN */
+  webAclArn?: string;
+  /** Price class (default: PriceClass_100 — US/Canada/Europe) */
+  priceClass?: 'PriceClass_100' | 'PriceClass_200' | 'PriceClass_All';
+}
+
+// ---------------------------------------------------------------------------
+// ElastiCache (Redis)
+// ---------------------------------------------------------------------------
+
+export interface ElastiCacheConfig {
+  /** Cluster/replication group name */
+  name: string;
+  /**
+   * Override the replication group ID for lookup.
+   * Default: uses `name`. Use this when adopting CDK-created resources
+   * with non-standard IDs (e.g. 'str17cldn0xmk8a0').
+   */
+  replicationGroupId?: string;
+  /** Engine (default: redis) */
+  engine?: 'redis' | 'valkey';
+  /** Node type (default: cache.t3.micro) */
+  nodeType?: string;
+  /** Number of cache nodes / clusters (default: 1) */
+  numNodes?: number;
+  /** Enable automatic failover (requires numNodes >= 2) */
+  automaticFailover?: boolean;
+  /** Enable transit encryption / TLS (default: true) */
+  transitEncryption?: boolean;
+  /** Enable at-rest encryption (default: true) */
+  atRestEncryption?: boolean;
+  /** KMS key ARN for at-rest encryption */
+  kmsKeyArn?: string;
+  /** Auth token secret ARN (Secrets Manager) */
+  authTokenSecretArn?: string;
+  /** Place in VPC isolated subnets (default: true) */
+  vpc?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Step Functions
+// ---------------------------------------------------------------------------
+
+export interface StepFunctionStepConfig {
+  name: string;
+  /** Target Lambda function name */
+  targetLambda: string;
+  /** Payload template (JSON) */
+  payload?: Record<string, unknown>;
+  /** Retry config */
+  retry?: {
+    errors?: string[];
+    interval?: number;
+    maxAttempts?: number;
+    backoffRate?: number;
+  };
+}
+
+export interface StepFunctionConfig {
+  /** State machine name */
+  name: string;
+  /** State machine type (default: STANDARD) */
+  type?: 'STANDARD' | 'EXPRESS';
+  /** Timeout in minutes (default: 5) */
+  timeout?: number;
+  /** Enable X-Ray tracing (default: true) */
+  tracing?: boolean;
+  /** CloudWatch log level (default: ALL) */
+  logLevel?: 'ALL' | 'ERROR' | 'FATAL' | 'OFF';
+  /** Definition as Amazon States Language JSON */
+  definition?: Record<string, unknown>;
+  /** DLQ for failed executions (SQS queue name) */
+  dlqName?: string;
+}
+
+// ---------------------------------------------------------------------------
+// SQS
+// ---------------------------------------------------------------------------
+
+export interface SqsQueueConfig {
+  /** Queue name */
+  name: string;
+  /** Message retention period in days (default: 4) */
+  retentionDays?: number;
+  /** Visibility timeout in seconds (default: 30) */
+  visibilityTimeout?: number;
+  /** Enable server-side encryption (default: true) */
+  encryption?: boolean;
+  /** Enforce SSL (default: true) */
+  enforceSSL?: boolean;
+  /** Dead letter queue name */
+  dlqName?: string;
+  /** Max receive count before sending to DLQ (default: 3) */
+  maxReceiveCount?: number;
+  /** FIFO queue (default: false) */
+  fifo?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// CloudWatch Alarms
+// ---------------------------------------------------------------------------
+
+export interface CloudWatchAlarmConfig {
+  /** Alarm name */
+  name: string;
+  /** Description */
+  description?: string;
+  /** Metric namespace */
+  namespace: string;
+  /** Metric name */
+  metricName: string;
+  /** Dimensions */
+  dimensions?: Record<string, string>;
+  /** Statistic (default: Average) */
+  statistic?: 'Average' | 'Sum' | 'Minimum' | 'Maximum' | 'SampleCount' | 'p99' | 'p95' | 'p90';
+  /** Period in seconds (default: 300) */
+  period?: number;
+  /** Evaluation periods (default: 1) */
+  evaluationPeriods?: number;
+  /** Threshold */
+  threshold: number;
+  /** Comparison operator */
+  comparisonOperator?: 'GreaterThanThreshold' | 'LessThanThreshold' | 'GreaterThanOrEqualToThreshold' | 'LessThanOrEqualToThreshold';
+  /** SNS topic name for alarm actions */
+  alarmTopicName?: string;
+  /** Treat missing data (default: notBreaching) */
+  treatMissingData?: 'breaching' | 'notBreaching' | 'ignore' | 'missing';
+  /** Math expression (overrides namespace/metricName) */
+  mathExpression?: string;
+  /** Metrics used in math expression */
+  usingMetrics?: Record<string, { namespace: string; metricName: string; dimensions?: Record<string, string>; statistic?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +491,8 @@ export interface ForgeConfig {
   /** Resource declarations */
   vpc?: VpcConfig;
   rds?: RdsConfig;
-  cognito?: CognitoConfig;
+  /** Single Cognito pool or array of pools (multi-pool apps like txdmv-rts) */
+  cognito?: CognitoConfig | CognitoConfig[];
   lambda?: LambdaFunctionConfig[];
   apiGateway?: ApiGatewayConfig;
   dynamodb?: DynamoTableConfig[];
@@ -329,6 +503,11 @@ export interface ForgeConfig {
   iam?: IamRoleConfig[];
   ssm?: SsmParameterConfig[];
   sns?: SnsTopicConfig[];
+  cloudfront?: CloudFrontDistributionConfig[];
+  elasticache?: ElastiCacheConfig;
+  stepFunctions?: StepFunctionConfig[];
+  sqs?: SqsQueueConfig[];
+  alarms?: CloudWatchAlarmConfig[];
 }
 
 /**

@@ -85,7 +85,7 @@ export async function describeRds(
   const mode = config.mode ?? 'aurora-serverless-v2';
 
   if (mode === 'aurora-serverless-v2') {
-    const clusterId = `${appName}-aurora`;
+    const clusterId = config.clusterId ?? `${appName}-aurora`;
     try {
       const res = await rds.send(new DescribeDBClustersCommand({ DBClusterIdentifier: clusterId }));
       const cluster = res.DBClusters?.[0];
@@ -133,7 +133,7 @@ export async function describeRds(
     }
   } else {
     // Standard RDS instance
-    const instanceId = `${appName}-db`;
+    const instanceId = config.clusterId ?? `${appName}-db`;
     try {
       const res = await rds.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: instanceId }));
       const instance = res.DBInstances?.[0];
@@ -167,7 +167,9 @@ export async function planRds(
 ): Promise<RdsState | null> {
   const current = await describeRds(ctx, config, appName);
   const mode = config.mode ?? 'aurora-serverless-v2';
-  const resourceId = mode === 'aurora-serverless-v2' ? `${appName}-aurora` : `${appName}-db`;
+  const resourceId = mode === 'aurora-serverless-v2'
+    ? (config.clusterId ?? `${appName}-aurora`)
+    : (config.clusterId ?? `${appName}-db`);
 
   if (current) {
     // Check for drift
@@ -414,7 +416,7 @@ export async function applyRds(
   const paramGroupName = await ensureParameterGroup(rds, appName, mode, engineVersion, forceSsl);
 
   if (mode === 'aurora-serverless-v2') {
-    const clusterId = `${appName}-aurora`;
+    const clusterId = config.clusterId ?? `${appName}-aurora`;
 
     if (!existing) {
       // Create Aurora cluster
@@ -545,7 +547,7 @@ export async function applyRds(
   }
 
   // Standard RDS instance (naeum pattern)
-  const instanceId = `${appName}-db`;
+  const instanceId = config.clusterId ?? `${appName}-db`;
 
   if (!existing) {
     const password = generatePassword();

@@ -132,6 +132,13 @@ async function importRds(ctx: ImportContext): Promise<any | undefined> {
           passwordStore: 'secrets-manager',
         };
 
+        // If the cluster ID doesn't match Forge's default naming convention
+        // ({app}-aurora), emit a clusterId override so describeRds can find it.
+        const expectedId = `${ctx.stackName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')}-aurora`;
+        if (clusterId !== expectedId) {
+          config.clusterId = clusterId;
+        }
+
         if (isServerless) {
           config.minCapacity = cluster.ServerlessV2ScalingConfiguration?.MinCapacity;
           config.maxCapacity = cluster.ServerlessV2ScalingConfiguration?.MaxCapacity;
