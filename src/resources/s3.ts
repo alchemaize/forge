@@ -17,6 +17,9 @@ import {
   PutBucketVersioningCommand,
   GetBucketEncryptionCommand,
   GetPublicAccessBlockCommand,
+  GetBucketTaggingCommand,
+  GetBucketPolicyCommand,
+  PutBucketPolicyCommand,
 } from '@aws-sdk/client-s3';
 import type { AwsContext } from '../aws.js';
 import type { S3BucketConfig } from '../config.js';
@@ -184,16 +187,61 @@ export async function applyS3Bucket(
     }));
   }
 
-  // Tags
-  await s3.send(new PutBucketTaggingCommand({
-    Bucket: bucketName,
-    Tagging: {
-      TagSet: [
-        { Key: 'app', Value: appName },
-        { Key: 'managed-by', Value: 'forge' },
-      ],
-    },
-  }));
+  // Bucket policy. Only PUT if drift — comparing parsed objects avoids spurious
+  // updates from whitespace/key-order differences. When config.policy is unset,
+  // we leave any existing policy alone (adoption-safe).
+  if (config.policy) {
+    let currentPolicy: any = null;
+    try {
+      const polRes = await s3.send(new GetBucketPolicyCommand({ Bucket: bucketName }));
+      if (polRes.Policy) currentPolicy = JSON.parse(polRes.Policy);
+    } catch (err: any) {
+      if (err.name !== 'NoSuchBucketPolicy') throw err;
+    }
+    const desiredJson = JSON.stringify(config.policy);
+    const currentJson = currentPolicy ? JSON.stringify(currentPolicy) : null;
+    if (desiredJson !== currentJson) {
+      console.log(`[s3] ${bucketName}: updating bucket policy`);
+      await s3.send(new PutBucketPolicyCommand({
+        Bucket: bucketName,
+        Policy: desiredJson,
+      }));
+    }
+  }
+
+  // Tags. Tricky on adopted buckets:
+  //   - PutBucketTagging is a full REPLACE, not merge.
+  //   - System tags (aws:cloudformation:*, aws:autoscaling:*) can't be removed by us
+  //     ("System tags cannot be removed by requester").
+  //   - We also can't re-PUT them because aws:* is a reserved prefix
+  //     ("Tag prefix 'aws:' is reserved for system tags").
+  // So if any aws:* tags exist (CDK/CFN-created bucket), skip the tag PUT entirely.
+  // Forge tags are nice-to-have for buckets Forge created from scratch; on adoption
+  // we leave the tag set alone so we don't fight CloudFormation.
+  let canTag = true;
+  try {
+    const tagRes = await s3.send(new GetBucketTaggingCommand({ Bucket: bucketName }));
+    const existingTags = tagRes.TagSet ?? [];
+    if (existingTags.some(t => (t.Key ?? '').startsWith('aws:'))) {
+      canTag = false;
+      console.log(`[s3] ${bucketName} has aws:* system tags — skipping Forge tag set (would be rejected by AWS)`);
+    }
+  } catch (err: any) {
+    // NoSuchTagSet means no tags yet — safe to add Forge tags.
+    if (err.name !== 'NoSuchTagSet') throw err;
+  }
+
+  if (canTag) {
+    await s3.send(new PutBucketTaggingCommand({
+      Bucket: bucketName,
+      Tagging: {
+        TagSet: [
+          { Key: 'app', Value: appName },
+          { Key: 'managed-by', Value: 'forge' },
+        ],
+      },
+    }));
+  }
 
   return { bucketName, exists: true };
 }

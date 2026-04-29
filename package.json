@@ -28,6 +28,7 @@
     "@aws-sdk/client-elasticache": "^3.1037.0",
     "@aws-sdk/client-eventbridge": "^3.700.0",
     "@aws-sdk/client-iam": "^3.700.0",
+    "@aws-sdk/client-kms": "^3.1038.0",
     "@aws-sdk/client-lambda": "^3.700.0",
     "@aws-sdk/client-rds": "^3.700.0",
     "@aws-sdk/client-s3": "^3.700.0",

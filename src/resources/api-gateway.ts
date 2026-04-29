@@ -190,11 +190,20 @@ export async function applyApiGateway(
     const authorizerName = `${appName}-cognito-jwt`;
 
     const authorizersRes = await apigw.send(new GetAuthorizersCommand({ ApiId: apiId }));
-    const existingAuth = authorizersRes.Items?.find(a => a.Name === authorizerName);
+    // Match by JWT issuer first (semantic match — works for adopted authorizers regardless
+    // of name). Fall back to name match for authorizers Forge created in earlier runs.
+    // Adopting an existing authorizer this way avoids creating a duplicate alongside
+    // the CDK-named one (visiblewealth had this happen on 2026-04-29 — `cognito-jwt` existed
+    // in CDK, Forge created `visiblewealth-cognito-jwt` because it didn't recognize the first).
+    const existingAuth =
+      authorizersRes.Items?.find(a =>
+        a.AuthorizerType === 'JWT' && a.JwtConfiguration?.Issuer === issuer
+      )
+      ?? authorizersRes.Items?.find(a => a.Name === authorizerName);
 
     if (existingAuth) {
       authorizerId = existingAuth.AuthorizerId!;
-      console.log(`[api-gw] JWT authorizer exists: ${authorizerId}`);
+      console.log(`[api-gw] JWT authorizer exists: ${authorizerId} (${existingAuth.Name})`);
 
       // Check drift
       if (existingAuth.JwtConfiguration?.Issuer !== issuer) {
@@ -273,6 +282,44 @@ export async function applyApiGateway(
         RouteKey: routeKey,
         Target: routeTarget,
         AuthorizationType: 'NONE',
+      }));
+    } else if (existingRoute.AuthorizationType !== 'NONE') {
+      // Drift: route was authenticated, config wants public. Update.
+      console.log(`[api-gw] Updating public route (was JWT): ${routeKey}`);
+      await apigw.send(new UpdateRouteCommand({
+        ApiId: apiId,
+        RouteId: existingRoute.RouteId!,
+        AuthorizationType: 'NONE',
+        Target: routeTarget,
+      }));
+    }
+  }
+
+  // Authenticated routes (require JWT) — used when not in catchAll mode, or alongside it
+  // for routes that aren't covered by {proxy+}. Each gets the same JWT authorizer.
+  for (const routeKey of config.authenticatedRoutes ?? []) {
+    if (!authorizerId) {
+      console.log(`[api-gw] Skipping ${routeKey}: no JWT authorizer (Cognito not configured)`);
+      continue;
+    }
+    const existingRoute = existingRoutes.find(r => r.RouteKey === routeKey);
+    if (!existingRoute) {
+      console.log(`[api-gw] Creating authenticated route: ${routeKey}`);
+      await apigw.send(new CreateRouteCommand({
+        ApiId: apiId,
+        RouteKey: routeKey,
+        Target: routeTarget,
+        AuthorizationType: 'JWT',
+        AuthorizerId: authorizerId,
+      }));
+    } else if (existingRoute.AuthorizationType !== 'JWT' || existingRoute.AuthorizerId !== authorizerId) {
+      console.log(`[api-gw] Updating authenticated route: ${routeKey}`);
+      await apigw.send(new UpdateRouteCommand({
+        ApiId: apiId,
+        RouteId: existingRoute.RouteId!,
+        AuthorizationType: 'JWT',
+        AuthorizerId: authorizerId,
+        Target: routeTarget,
       }));
     }
   }

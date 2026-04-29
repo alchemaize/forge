@@ -18,6 +18,11 @@
 
 import { fromIni } from '@aws-sdk/credential-providers';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+
+// See import.ts for rationale — generated configs use absolute path to this Forge.
+const FORGE_CONFIG_PATH = resolve(dirname(fileURLToPath(import.meta.url)), 'config.js');
 
 // ---------------------------------------------------------------------------
 // Discovery context
@@ -98,8 +103,11 @@ async function discoverLambdas(ctx: DiscoverContext): Promise<any[]> {
 
           for (const [key, value] of Object.entries(envVars)) {
             if (awsInjected.has(key)) continue;
+            // Skip secret-pattern env vars entirely (don't write secrets to config files).
+            // applyLambda's env-merge preserves them from the live function on apply.
             const isSecret = secretPatterns.some(p => p.test(key));
-            filteredEnv[key] = isSecret ? 'REDACTED — set via AWS Console or CLI' : value;
+            if (isSecret) continue;
+            filteredEnv[key] = value;
           }
 
           functions.push({
@@ -109,6 +117,9 @@ async function discoverLambdas(ctx: DiscoverContext): Promise<any[]> {
             timeout: cfg.Timeout,
             handler: cfg.Handler,
             architecture: cfg.Architectures?.[0] ?? 'x86_64',
+            // Capture the existing role ARN — without this, applyLambda would create
+            // a new role and swap the function over to it on apply.
+            roleArn: cfg.Role,
             vpc: !!(cfg.VpcConfig?.SubnetIds?.length),
             vpcConfig: cfg.VpcConfig,
             env: Object.keys(filteredEnv).length > 0 ? filteredEnv : undefined,
@@ -175,6 +186,15 @@ async function discoverCognito(ctx: DiscoverContext): Promise<any[]> {
       }
       if (p.LambdaConfig?.PreSignUp) {
         triggers.preSignUp = p.LambdaConfig.PreSignUp.split(':').pop();
+      }
+      if (p.LambdaConfig?.CustomMessage) {
+        triggers.customMessage = p.LambdaConfig.CustomMessage.split(':').pop();
+      }
+      if (p.LambdaConfig?.CustomEmailSender?.LambdaArn) {
+        triggers.customEmailSender = p.LambdaConfig.CustomEmailSender.LambdaArn.split(':').pop();
+      }
+      if (p.LambdaConfig?.KMSKeyID) {
+        triggers.customSenderKmsKey = p.LambdaConfig.KMSKeyID;
       }
 
       pools.push({
@@ -636,7 +656,7 @@ export async function discoverApp(
   lines.push(` * Forge will NOT delete or recreate existing resources — it adopts them in place.`);
   lines.push(` */`);
   lines.push(``);
-  lines.push(`import { defineConfig } from './src/config.js';`);
+  lines.push(`import { defineConfig } from '${FORGE_CONFIG_PATH}';`);
   lines.push(`// If using from outside the forge directory, change to:`);
   lines.push(`// import { defineConfig } from '<path-to-forge>/src/config.js';`);
   lines.push(``);

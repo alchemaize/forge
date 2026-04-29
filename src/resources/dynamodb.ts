@@ -9,6 +9,7 @@ import {
   DynamoDBClient,
   DescribeTableCommand,
   CreateTableCommand,
+  UpdateTableCommand,
   UpdateTimeToLiveCommand,
   DescribeTimeToLiveCommand,
   ListTablesCommand,
@@ -201,6 +202,63 @@ export async function applyDynamoTable(
     console.log(`[dynamodb] Created: ${config.name}`);
   } else {
     console.log(`[dynamodb] Table exists: ${config.name}`);
+
+    // Add missing GSIs to existing table. Previously planLambda would emit
+    // "create GSI" diffs but applyLambda silently skipped — the audit's BUG #11.
+    // GSI create is async (table goes to UPDATING status); we add one at a time
+    // because DynamoDB only allows a single GSI mutation per UpdateTable call.
+    const desiredGsis = config.gsi ?? [];
+    const missingGsis = desiredGsis.filter(g => !current!.gsiNames.includes(g.name));
+    for (const gsi of missingGsis) {
+      console.log(`[dynamodb] Creating GSI on ${config.name}: ${gsi.name}`);
+
+      // GSI key attributes might not be in the table's existing AttributeDefinitions —
+      // UpdateTable requires us to declare them along with the GSI create.
+      const newAttrs: Array<{ AttributeName: string; AttributeType: ScalarAttributeType }> = [];
+      const seen = new Set<string>();
+      const addAttr = (name: string) => {
+        if (!seen.has(name)) {
+          seen.add(name);
+          newAttrs.push({ AttributeName: name, AttributeType: 'S' as ScalarAttributeType });
+        }
+      };
+      addAttr(gsi.pk);
+      if (gsi.sk) addAttr(gsi.sk);
+
+      try {
+        await ddb.send(new UpdateTableCommand({
+          TableName: config.name,
+          AttributeDefinitions: newAttrs,
+          GlobalSecondaryIndexUpdates: [{
+            Create: {
+              IndexName: gsi.name,
+              KeySchema: [
+                { AttributeName: gsi.pk, KeyType: 'HASH' as const },
+                ...(gsi.sk ? [{ AttributeName: gsi.sk, KeyType: 'RANGE' as const }] : []),
+              ],
+              Projection: {
+                ProjectionType: (Array.isArray(gsi.projection) ? 'INCLUDE' : (gsi.projection ?? 'ALL')) as any,
+                ...(Array.isArray(gsi.projection) ? { NonKeyAttributes: gsi.projection } : {}),
+              },
+            },
+          }],
+        }));
+        // Wait for the table to leave UPDATING before doing another GSI add
+        // (DynamoDB rejects concurrent GSI changes with LimitExceededException).
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          const refreshed = await describeDynamoTable(ctx, config.name);
+          if (refreshed?.status === 'ACTIVE') {
+            current = refreshed;
+            break;
+          }
+        }
+      } catch (err: any) {
+        // Don't fail the whole apply if one GSI add hits a transient issue —
+        // just log and continue. User can re-run plan to see what's still missing.
+        console.log(`[dynamodb] Warning: could not add GSI ${gsi.name}: ${err.message}`);
+      }
+    }
   }
 
   // Enable TTL if configured

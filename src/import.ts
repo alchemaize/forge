@@ -12,6 +12,13 @@
 
 import { fromIni } from '@aws-sdk/credential-providers';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+
+// Resolved at runtime so the generated config's import path always points to
+// THIS Forge installation, not a hardcoded one. Generated configs work from
+// any project directory without manual editing.
+const FORGE_CONFIG_PATH = resolve(dirname(fileURLToPath(import.meta.url)), 'config.js');
 
 // ---------------------------------------------------------------------------
 // Types for CloudFormation resource extraction
@@ -47,6 +54,13 @@ interface ImportedConfig {
   ecr?: any[];
   ecsExpress?: any[];
   eventbridge?: any[];
+  kms?: any[];
+  secrets?: any[];
+  pinpoint?: any[];
+  managedPolicies?: any[];
+  securityGroups?: any[];
+  lambdaLayers?: any[];
+  eventBuses?: any[];
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +185,7 @@ async function importRds(ctx: ImportContext): Promise<any | undefined> {
       const instance = desc.DBInstances?.[0];
 
       if (instance) {
-        return {
+        const config: any = {
           mode: 'instance' as const,
           engineVersion: instance.EngineVersion,
           dbName: instance.DBName,
@@ -181,6 +195,15 @@ async function importRds(ctx: ImportContext): Promise<any | undefined> {
           deletionProtection: instance.DeletionProtection ?? false,
           proxy: proxies.length > 0,
         };
+        // CDK-created instances don't follow Forge's default {app}-db naming.
+        // Without an explicit clusterId override, describeRds would look for the
+        // wrong ID and report the instance as missing — plan would then say CREATE,
+        // and apply would try to provision a brand new database. Capture the actual ID.
+        const expectedId = `${ctx.stackName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')}-db`;
+        if (instanceId !== expectedId) {
+          config.clusterId = instanceId;
+        }
+        return config;
       }
     } catch (err: any) {
       console.log(`  [rds] Warning: could not describe instance ${instanceId}: ${err.message}`);
@@ -191,11 +214,8 @@ async function importRds(ctx: ImportContext): Promise<any | undefined> {
 }
 
 async function importCognito(ctx: ImportContext): Promise<any | undefined> {
-  const pools = ctx.resources.filter(r => r.ResourceType === 'AWS::Cognito::UserPool');
-  if (pools.length === 0) return undefined;
-
-  const poolId = pools[0].PhysicalResourceId;
-  console.log(`  [cognito] Found user pool: ${poolId}`);
+  const poolResources = ctx.resources.filter(r => r.ResourceType === 'AWS::Cognito::UserPool');
+  if (poolResources.length === 0) return undefined;
 
   const {
     CognitoIdentityProviderClient,
@@ -209,74 +229,138 @@ async function importCognito(ctx: ImportContext): Promise<any | undefined> {
     credentials: ctx.credentials,
   });
 
-  try {
-    const poolDesc = await cog.send(new DescribeUserPoolCommand({ UserPoolId: poolId }));
-    const pool = poolDesc.UserPool;
+  // Iterate every pool. txdmv-rts has 4 (county/dealer/citizen/le); a previous version
+  // of this importer took only pools[0] and silently dropped the other 3.
+  const poolConfigs: any[] = [];
+  for (const poolRes of poolResources) {
+    const poolId = poolRes.PhysicalResourceId;
+    console.log(`  [cognito] Found user pool: ${poolId}`);
 
-    // Get clients
-    const clientsRes = await cog.send(new ListUserPoolClientsCommand({
-      UserPoolId: poolId,
-      MaxResults: 60,
-    }));
+    try {
+      const poolDesc = await cog.send(new DescribeUserPoolCommand({ UserPoolId: poolId }));
+      const pool = poolDesc.UserPool;
 
-    const clients: any[] = [];
-    for (const c of clientsRes.UserPoolClients ?? []) {
-      const clientDesc = await cog.send(new DescribeUserPoolClientCommand({
+      // Get clients
+      const clientsRes = await cog.send(new ListUserPoolClientsCommand({
         UserPoolId: poolId,
-        ClientId: c.ClientId!,
+        MaxResults: 60,
       }));
-      const cc = clientDesc.UserPoolClient;
-      clients.push({
-        name: cc?.ClientName,
-        authFlows: cc?.ExplicitAuthFlows,
-        generateSecret: !!cc?.ClientSecret,
-        callbackUrls: cc?.CallbackURLs?.length ? cc.CallbackURLs : undefined,
-        logoutUrls: cc?.LogoutURLs?.length ? cc.LogoutURLs : undefined,
-      });
-      console.log(`  [cognito] Found client: ${cc?.ClientName} (${cc?.ClientId})`);
-    }
 
-    // Extract triggers
-    const triggers: any = {};
-    const lambdaConfig = pool?.LambdaConfig;
-    if (lambdaConfig?.PreTokenGeneration) {
-      // Extract function name from ARN
-      triggers.preTokenGeneration = lambdaConfig.PreTokenGeneration.split(':').pop();
-      console.log(`  [cognito] PreTokenGeneration trigger: ${triggers.preTokenGeneration}`);
-    }
-    if (lambdaConfig?.PostConfirmation) {
-      triggers.postConfirmation = lambdaConfig.PostConfirmation.split(':').pop();
-      console.log(`  [cognito] PostConfirmation trigger: ${triggers.postConfirmation}`);
-    }
-    if (lambdaConfig?.PreSignUp) {
-      triggers.preSignUp = lambdaConfig.PreSignUp.split(':').pop();
-    }
-    if (lambdaConfig?.CustomMessage) {
-      triggers.customMessage = lambdaConfig.CustomMessage.split(':').pop();
-    }
+      const clients: any[] = [];
+      for (const c of clientsRes.UserPoolClients ?? []) {
+        const clientDesc = await cog.send(new DescribeUserPoolClientCommand({
+          UserPoolId: poolId,
+          ClientId: c.ClientId!,
+        }));
+        const cc = clientDesc.UserPoolClient;
+        clients.push({
+          name: cc?.ClientName,
+          authFlows: cc?.ExplicitAuthFlows,
+          generateSecret: !!cc?.ClientSecret,
+          callbackUrls: cc?.CallbackURLs?.length ? cc.CallbackURLs : undefined,
+          logoutUrls: cc?.LogoutURLs?.length ? cc.LogoutURLs : undefined,
+        });
+        console.log(`    [cognito] Found client: ${cc?.ClientName} (${cc?.ClientId})`);
+      }
 
-    const config: any = {
-      poolName: pool?.Name,
-      emailSignup: pool?.UsernameAttributes?.includes('email') ?? true,
-      clients,
-    };
+      // Extract triggers
+      const triggers: any = {};
+      const lambdaConfig = pool?.LambdaConfig;
+      if (lambdaConfig?.PreTokenGeneration) {
+        triggers.preTokenGeneration = lambdaConfig.PreTokenGeneration.split(':').pop();
+        console.log(`    [cognito] PreTokenGeneration trigger: ${triggers.preTokenGeneration}`);
+      }
+      if (lambdaConfig?.PostConfirmation) {
+        triggers.postConfirmation = lambdaConfig.PostConfirmation.split(':').pop();
+        console.log(`    [cognito] PostConfirmation trigger: ${triggers.postConfirmation}`);
+      }
+      if (lambdaConfig?.PreSignUp) {
+        triggers.preSignUp = lambdaConfig.PreSignUp.split(':').pop();
+      }
+      if (lambdaConfig?.CustomMessage) {
+        triggers.customMessage = lambdaConfig.CustomMessage.split(':').pop();
+      }
+      if (lambdaConfig?.CustomEmailSender?.LambdaArn) {
+        triggers.customEmailSender = lambdaConfig.CustomEmailSender.LambdaArn.split(':').pop();
+        console.log(`    [cognito] CustomEmailSender trigger: ${triggers.customEmailSender}`);
+      }
+      if (lambdaConfig?.KMSKeyID) {
+        triggers.customSenderKmsKey = lambdaConfig.KMSKeyID;
+      }
 
-    if (Object.keys(triggers).length > 0) {
-      config.triggers = triggers;
+      const poolConfig: any = {
+        poolName: pool?.Name,
+        emailSignup: pool?.UsernameAttributes?.includes('email') ?? true,
+        clients,
+      };
+
+      // Cognito Hosted UI domain. The Domain field on a pool is the prefix string
+      // (or the full custom domain). Capture it so applyCognito can verify on plan.
+      if (pool?.Domain) {
+        poolConfig.domainPrefix = pool.Domain;
+        console.log(`    [cognito] Domain: ${pool.Domain}`);
+      }
+
+      // Password policy
+      if (pool?.Policies?.PasswordPolicy) {
+        const pp = pool.Policies.PasswordPolicy;
+        poolConfig.passwordPolicy = {
+          minLength: pp.MinimumLength,
+          requireLowercase: pp.RequireLowercase,
+          requireUppercase: pp.RequireUppercase,
+          requireDigits: pp.RequireNumbers,
+          requireSymbols: pp.RequireSymbols,
+        };
+      }
+
+      // MFA
+      if (pool?.MfaConfiguration && pool.MfaConfiguration !== 'OFF') {
+        poolConfig.mfa = pool.MfaConfiguration;
+      }
+
+      // Custom attributes (filter out built-in standard attributes — those start with
+      // lowercase letters, custom ones start with 'custom:' in the name).
+      const customAttrs = (pool?.SchemaAttributes ?? []).filter(a =>
+        a.Name?.startsWith('custom:') || (a.DeveloperOnlyAttribute === false && /^[A-Z_]/.test(a.Name?.[0] ?? ''))
+      );
+      // Cognito returns custom attrs with 'custom:' prefix in the Name. Strip for config —
+      // applyCognito's AddCustomAttributesCommand expects bare names.
+      const captured = customAttrs.map(a => ({
+        name: a.Name!.replace(/^custom:/, ''),
+        type: a.AttributeDataType,
+        mutable: a.Mutable,
+        required: a.Required,
+      }));
+      if (captured.length > 0) {
+        poolConfig.customAttributes = captured;
+        console.log(`    [cognito] Custom attributes: ${captured.length}`);
+      }
+
+      // Account recovery
+      const recovery = pool?.AccountRecoverySetting?.RecoveryMechanisms?.[0]?.Name;
+      if (recovery === 'verified_email') poolConfig.accountRecovery = 'EMAIL_ONLY';
+      else if (recovery === 'verified_phone_number') poolConfig.accountRecovery = 'PHONE_ONLY';
+
+      if (Object.keys(triggers).length > 0) {
+        poolConfig.triggers = triggers;
+      }
+
+      if (pool?.EmailConfiguration?.SourceArn) {
+        poolConfig.emailSender = pool.EmailConfiguration.EmailSendingAccount === 'DEVELOPER'
+          ? pool.EmailConfiguration.From ?? pool.EmailConfiguration.SourceArn
+          : undefined;
+      }
+
+      poolConfigs.push(poolConfig);
+    } catch (err: any) {
+      console.log(`  [cognito] Warning: could not describe pool ${poolId}: ${err.message}`);
     }
-
-    // Check for email sender config
-    if (pool?.EmailConfiguration?.SourceArn) {
-      config.emailSender = pool.EmailConfiguration.EmailSendingAccount === 'DEVELOPER'
-        ? pool.EmailConfiguration.From ?? pool.EmailConfiguration.SourceArn
-        : undefined;
-    }
-
-    return config;
-  } catch (err: any) {
-    console.log(`  [cognito] Warning: could not describe pool ${poolId}: ${err.message}`);
-    return undefined;
   }
+
+  if (poolConfigs.length === 0) return undefined;
+  // Single pool → return as object (matches CognitoConfig). Multiple → return as array
+  // (matches CognitoConfig[]). The defineConfig type accepts either form.
+  return poolConfigs.length === 1 ? poolConfigs[0] : poolConfigs;
 }
 
 async function importLambdas(ctx: ImportContext): Promise<any[]> {
@@ -319,11 +403,120 @@ async function importLambdas(ctx: ImportContext): Promise<any[]> {
         timeout: cfg.Timeout,
         handler: cfg.Handler,
         architecture: cfg.Architectures?.[0] ?? 'x86_64',
+        // Capture the existing role ARN. Without this, applyLambda would create a
+        // fresh role and silently swap the function over to it on apply.
+        roleArn: cfg.Role,
       };
 
       // Check if in VPC
       if (cfg.VpcConfig?.SubnetIds?.length) {
         lambdaConfig.vpc = true;
+      }
+
+      // Capture both managed AND inline policies on the role.
+      // Managed: ARNs only — applyLambda attaches them additively.
+      // Inline: full statements per named policy — applyLambda PutRolePolicy's by name,
+      // letting Forge take ownership of CDK-named policies (e.g. 'EmberLambdaRoleDefaultPolicyXYZ').
+      // Without inline capture, those policies would stay in CFN ownership forever and
+      // CFN stack retirement would be impossible.
+      if (cfg.Role) {
+        const roleName = cfg.Role.split('/').pop();
+        if (roleName) {
+          try {
+            const {
+              IAMClient: IamClass,
+              ListAttachedRolePoliciesCommand: ListAttachedPoliciesCmd,
+              ListRolePoliciesCommand: ListInlineCmd,
+              GetRolePolicyCommand: GetInlineCmd,
+            } = await import('@aws-sdk/client-iam');
+            const iam = new IamClass({ region: ctx.region, credentials: ctx.credentials });
+
+            const managedRes = await iam.send(new ListAttachedPoliciesCmd({ RoleName: roleName }));
+            const arns = (managedRes.AttachedPolicies ?? [])
+              .map((p: any) => p.PolicyArn)
+              .filter(Boolean) as string[];
+            if (arns.length > 0) lambdaConfig.policies = arns;
+
+            const inlineRes = await iam.send(new ListInlineCmd({ RoleName: roleName }));
+            const inlineNames = inlineRes.PolicyNames ?? [];
+            const inlinePolicies: any[] = [];
+            for (const policyName of inlineNames) {
+              try {
+                const policyRes = await iam.send(new GetInlineCmd({ RoleName: roleName, PolicyName: policyName }));
+                // PolicyDocument comes back URL-encoded JSON.
+                const docStr = decodeURIComponent(policyRes.PolicyDocument ?? '{}');
+                const doc = JSON.parse(docStr);
+                const stmts = Array.isArray(doc.Statement) ? doc.Statement : [doc.Statement];
+                inlinePolicies.push({
+                  name: policyName,
+                  statements: stmts.map((s: any) => {
+                    const out: any = {
+                      effect: s.Effect,
+                      actions: Array.isArray(s.Action) ? s.Action : [s.Action],
+                      resources: Array.isArray(s.Resource) ? s.Resource : [s.Resource],
+                    };
+                    if (s.Sid) out.sid = s.Sid;
+                    if (s.Condition) out.conditions = s.Condition;
+                    return out;
+                  }),
+                });
+              } catch (err: any) {
+                console.log(`  [lambda] Warning: could not get inline policy ${policyName} on ${roleName}: ${err.message}`);
+              }
+            }
+            if (inlinePolicies.length > 0) lambdaConfig.inlinePolicies = inlinePolicies;
+          } catch (err: any) {
+            console.log(`  [lambda] Warning: could not list policies for role ${roleName}: ${err.message}`);
+          }
+        }
+      }
+
+      // Capture Function URL config if one exists. Lets Forge own URL settings
+      // (auth type, CORS) instead of relying on CDK to keep them in sync.
+      try {
+        const { GetFunctionUrlConfigCommand: GetUrlCmd } = await import('@aws-sdk/client-lambda');
+        const urlRes = await lam.send(new GetUrlCmd({ FunctionName: functionName }));
+        const fu: any = { authType: urlRes.AuthType };
+        if (urlRes.Cors) {
+          const cors: any = {};
+          if (urlRes.Cors.AllowOrigins?.length) cors.allowOrigins = urlRes.Cors.AllowOrigins;
+          if (urlRes.Cors.AllowMethods?.length) cors.allowMethods = urlRes.Cors.AllowMethods;
+          if (urlRes.Cors.AllowHeaders?.length) cors.allowHeaders = urlRes.Cors.AllowHeaders;
+          if (urlRes.Cors.AllowCredentials) cors.allowCredentials = urlRes.Cors.AllowCredentials;
+          if (urlRes.Cors.MaxAge) cors.maxAge = urlRes.Cors.MaxAge;
+          if (urlRes.Cors.ExposeHeaders?.length) cors.exposeHeaders = urlRes.Cors.ExposeHeaders;
+          if (Object.keys(cors).length > 0) fu.cors = cors;
+        }
+        lambdaConfig.functionUrl = fu;
+        console.log(`    [lambda] Function URL: ${urlRes.FunctionUrl}`);
+      } catch (err: any) {
+        // No URL configured for this function — that's normal.
+        if (err.name !== 'ResourceNotFoundException') {
+          console.log(`  [lambda] Warning: could not check Function URL for ${functionName}: ${err.message}`);
+        }
+      }
+
+      // Capture event source mappings (SQS, Kinesis, DynamoDB Streams → this Lambda).
+      try {
+        const { ListEventSourceMappingsCommand: ListEsmCmd } = await import('@aws-sdk/client-lambda');
+        const esmRes = await lam.send(new ListEsmCmd({ FunctionName: functionName }));
+        const sources = (esmRes.EventSourceMappings ?? [])
+          .filter(m => m.State === 'Enabled' || m.State === 'Creating')
+          .map(m => {
+            const src: any = { source: m.EventSourceArn };
+            if (m.BatchSize !== undefined) src.batchSize = m.BatchSize;
+            if (m.MaximumBatchingWindowInSeconds) src.maximumBatchingWindowInSeconds = m.MaximumBatchingWindowInSeconds;
+            if (m.FunctionResponseTypes?.includes('ReportBatchItemFailures')) {
+              src.reportBatchItemFailures = true;
+            }
+            return src;
+          });
+        if (sources.length > 0) {
+          lambdaConfig.eventSources = sources;
+          console.log(`    [lambda] Event sources: ${sources.length} (${sources.map((s: any) => s.source.split(':').pop()).join(', ')})`);
+        }
+      } catch (err: any) {
+        console.log(`  [lambda] Warning: could not list event sources for ${functionName}: ${err.message}`);
       }
 
       // Environment variables (exclude AWS-injected ones)
@@ -345,13 +538,14 @@ async function importLambdas(ctx: ImportContext): Promise<any[]> {
 
       for (const [key, value] of Object.entries(envVars)) {
         if (awsInjected.has(key)) continue;
-
+        // Skip secret-pattern env vars entirely. applyLambda's env-merge logic preserves
+        // them from the live function's current state, so omitting from config keeps
+        // secrets out of version control while staying safe on apply. Writing
+        // "REDACTED — ..." as a literal value would silently overwrite production
+        // secrets on the next apply (this happened on yeon-crm 2026-04-29).
         const isSecret = secretPatterns.some(p => p.test(key));
-        if (isSecret) {
-          filteredEnv[key] = `REDACTED — set via AWS Console or CLI`;
-        } else {
-          filteredEnv[key] = value;
-        }
+        if (isSecret) continue;
+        filteredEnv[key] = value;
       }
 
       if (Object.keys(filteredEnv).length > 0) {
@@ -396,17 +590,21 @@ async function importApiGateway(ctx: ImportContext): Promise<any | undefined> {
     const routes = routesRes.Items ?? [];
     const authorizer = authorizersRes.Items?.[0];
 
-    // Separate public vs authenticated routes
+    // Separate public vs authenticated routes. Capture both so the imported config
+    // accurately represents the live API. catchAll mode means {proxy+} routes are
+    // explicit; only treat as catch-all if the catch-all routes are present AND we
+    // don't have other authenticated routes outside it (otherwise it's mixed mode).
     const publicRoutes: string[] = [];
+    const authenticatedRoutes: string[] = [];
     let hasCatchAll = false;
 
     for (const route of routes) {
       if (route.RouteKey === '$default') continue;
-
       if (route.AuthorizationType === 'NONE') {
         publicRoutes.push(route.RouteKey!);
+      } else {
+        authenticatedRoutes.push(route.RouteKey!);
       }
-
       if (route.RouteKey?.includes('{proxy+}')) {
         hasCatchAll = true;
       }
@@ -417,6 +615,13 @@ async function importApiGateway(ctx: ImportContext): Promise<any | undefined> {
       corsOrigins: apiDesc.CorsConfiguration?.AllowOrigins,
       catchAll: hasCatchAll,
       publicRoutes: publicRoutes.length > 0 ? publicRoutes : undefined,
+      // Filter out catch-all routes from authenticatedRoutes — those are managed by the
+      // catchAll: true flag in apply, not enumerated explicitly. Keeps config tidy.
+      authenticatedRoutes: hasCatchAll
+        ? (authenticatedRoutes.filter(r => !r.includes('{proxy+}')).length > 0
+            ? authenticatedRoutes.filter(r => !r.includes('{proxy+}'))
+            : undefined)
+        : (authenticatedRoutes.length > 0 ? authenticatedRoutes : undefined),
     };
 
     // Extract Cognito pool/client from JWT authorizer
@@ -564,6 +769,21 @@ async function importS3(ctx: ImportContext): Promise<any[]> {
       // No lifecycle rules
     }
 
+    // Bucket policy (resource-based) — captured as parsed JSON object.
+    try {
+      const { GetBucketPolicyCommand: GetPolicyCmd } = await import('@aws-sdk/client-s3');
+      const polRes = await s3.send(new GetPolicyCmd({ Bucket: bucketName }));
+      if (polRes.Policy) {
+        config.policy = JSON.parse(polRes.Policy);
+        console.log(`  [s3] ${bucketName}: captured bucket policy`);
+      }
+    } catch (err: any) {
+      // No policy is normal for many buckets.
+      if (err.name !== 'NoSuchBucketPolicy') {
+        console.log(`  [s3] Warning: could not get policy for ${bucketName}: ${err.message}`);
+      }
+    }
+
     configs.push(config);
   }
 
@@ -619,6 +839,278 @@ async function importEventBridge(ctx: ImportContext): Promise<any[]> {
   return configs;
 }
 
+async function importLambdaLayers(ctx: ImportContext): Promise<any[]> {
+  const layerResources = ctx.resources.filter(r => r.ResourceType === 'AWS::Lambda::LayerVersion');
+  if (layerResources.length === 0) return [];
+
+  const { LambdaClient, GetLayerVersionByArnCommand } = await import('@aws-sdk/client-lambda');
+  const lambda = new LambdaClient({ region: ctx.region, credentials: ctx.credentials });
+
+  const configs: any[] = [];
+  // Track unique layer names — a stack might have multiple versions of the same layer.
+  const seen = new Set<string>();
+  for (const lr of layerResources) {
+    const arn = lr.PhysicalResourceId;
+    try {
+      const res = await lambda.send(new GetLayerVersionByArnCommand({ Arn: arn }));
+      const layerName = res.LayerArn?.split(':').pop();
+      if (!layerName || seen.has(layerName)) continue;
+      seen.add(layerName);
+      const config: any = { name: layerName };
+      if (res.Description) config.description = res.Description;
+      if (res.CompatibleRuntimes?.length) config.compatibleRuntimes = res.CompatibleRuntimes;
+      if (res.CompatibleArchitectures?.length) config.compatibleArchitectures = res.CompatibleArchitectures;
+      configs.push(config);
+      console.log(`  [lambda-layer] Found: ${layerName}`);
+    } catch (err: any) {
+      console.log(`  [lambda-layer] Warning: could not describe ${arn}: ${err.message}`);
+    }
+  }
+  return configs;
+}
+
+async function importEventBuses(ctx: ImportContext): Promise<any[]> {
+  const busResources = ctx.resources.filter(r => r.ResourceType === 'AWS::Events::EventBus');
+  if (busResources.length === 0) return [];
+
+  const configs: any[] = [];
+  for (const br of busResources) {
+    const name = br.PhysicalResourceId;
+    if (!name || name === 'default') continue;
+    configs.push({ name });
+    console.log(`  [event-bus] Found: ${name}`);
+  }
+  return configs;
+}
+
+async function importSecurityGroups(ctx: ImportContext): Promise<any[]> {
+  const sgResources = ctx.resources.filter(r => r.ResourceType === 'AWS::EC2::SecurityGroup');
+  if (sgResources.length === 0) return [];
+
+  const { EC2Client, DescribeSecurityGroupsCommand } = await import('@aws-sdk/client-ec2');
+  const ec2 = new EC2Client({ region: ctx.region, credentials: ctx.credentials });
+
+  // Fetch all in one call by group ID for efficiency.
+  const groupIds = sgResources.map(r => r.PhysicalResourceId).filter(Boolean);
+  let groups: any[] = [];
+  try {
+    const res = await ec2.send(new DescribeSecurityGroupsCommand({ GroupIds: groupIds }));
+    groups = res.SecurityGroups ?? [];
+  } catch (err: any) {
+    console.log(`  [security-group] Warning: could not describe SGs: ${err.message}`);
+    return [];
+  }
+
+  // Build a GroupId → GroupName map so we can convert UserIdGroupPairs into
+  // friendly sourceSg references in the imported config.
+  const idToName = new Map<string, string>();
+  for (const sg of groups) {
+    if (sg.GroupId && sg.GroupName) idToName.set(sg.GroupId, sg.GroupName);
+  }
+
+  const configs: any[] = [];
+  for (const sg of groups) {
+    if (!sg.GroupName) continue;
+
+    const buildRules = (perms: any[]): any[] => {
+      const rules: any[] = [];
+      for (const p of perms ?? []) {
+        const protocol = p.IpProtocol === '-1' ? '-1' : p.IpProtocol;
+        const base: any = { protocol };
+        if (protocol !== '-1') {
+          base.fromPort = p.FromPort;
+          base.toPort = p.ToPort;
+        }
+        // CIDR-based rules
+        for (const cidr of p.IpRanges ?? []) {
+          rules.push({ ...base, cidrIp: cidr.CidrIp, description: cidr.Description });
+        }
+        // SG-source rules → use friendly name if known (intra-stack), else GroupId
+        for (const pair of p.UserIdGroupPairs ?? []) {
+          rules.push({
+            ...base,
+            sourceSg: idToName.get(pair.GroupId) ?? pair.GroupId,
+            description: pair.Description,
+          });
+        }
+      }
+      return rules;
+    };
+
+    const config: any = {
+      name: sg.GroupName,
+      description: sg.Description ?? '',
+      vpcId: sg.VpcId,
+      ingress: buildRules(sg.IpPermissions),
+      egress: buildRules(sg.IpPermissionsEgress),
+    };
+    // Strip empty arrays so the config is tidy.
+    if (config.ingress.length === 0) delete config.ingress;
+    if (config.egress.length === 0) delete config.egress;
+
+    configs.push(config);
+    console.log(`  [security-group] Found: ${sg.GroupName}`);
+  }
+
+  return configs;
+}
+
+async function importManagedPolicies(ctx: ImportContext): Promise<any[]> {
+  const policyResources = ctx.resources.filter(r => r.ResourceType === 'AWS::IAM::ManagedPolicy');
+  if (policyResources.length === 0) return [];
+
+  const { IAMClient, GetPolicyCommand, GetPolicyVersionCommand } = await import('@aws-sdk/client-iam');
+  const iam = new IAMClient({ region: ctx.region, credentials: ctx.credentials });
+
+  const configs: any[] = [];
+  for (const pr of policyResources) {
+    const arn = pr.PhysicalResourceId;
+    try {
+      const policyRes = await iam.send(new GetPolicyCommand({ PolicyArn: arn }));
+      const meta = policyRes.Policy;
+      if (!meta) continue;
+
+      // Get the default version's document.
+      let document: any = { Version: '2012-10-17', Statement: [] };
+      if (meta.DefaultVersionId) {
+        const verRes = await iam.send(new GetPolicyVersionCommand({
+          PolicyArn: arn,
+          VersionId: meta.DefaultVersionId,
+        }));
+        if (verRes.PolicyVersion?.Document) {
+          document = JSON.parse(decodeURIComponent(verRes.PolicyVersion.Document));
+        }
+      }
+
+      const config: any = {
+        name: meta.PolicyName ?? arn.split('/').pop(),
+        document,
+      };
+      if (meta.Description) config.description = meta.Description;
+      configs.push(config);
+      console.log(`  [managed-policy] Found: ${meta.PolicyName}`);
+    } catch (err: any) {
+      console.log(`  [managed-policy] Warning: could not describe ${arn}: ${err.message}`);
+    }
+  }
+
+  return configs;
+}
+
+async function importPinpoint(ctx: ImportContext): Promise<any[]> {
+  const ppResources = ctx.resources.filter(r => r.ResourceType === 'AWS::Pinpoint::App');
+  if (ppResources.length === 0) return [];
+
+  const { PinpointClient, GetAppCommand } = await import('@aws-sdk/client-pinpoint');
+  const pp = new PinpointClient({ region: ctx.region, credentials: ctx.credentials });
+
+  const configs: any[] = [];
+  for (const pr of ppResources) {
+    const appId = pr.PhysicalResourceId;
+    try {
+      const res = await pp.send(new GetAppCommand({ ApplicationId: appId }));
+      const name = res.ApplicationResponse?.Name;
+      if (name) {
+        configs.push({ name });
+        console.log(`  [pinpoint] Found app: ${name}`);
+      }
+    } catch (err: any) {
+      console.log(`  [pinpoint] Warning: could not describe app ${appId}: ${err.message}`);
+    }
+  }
+  return configs;
+}
+
+async function importSecrets(ctx: ImportContext): Promise<any[]> {
+  const secretResources = ctx.resources.filter(r => r.ResourceType === 'AWS::SecretsManager::Secret');
+  if (secretResources.length === 0) return [];
+
+  const { SecretsManagerClient, DescribeSecretCommand } =
+    await import('@aws-sdk/client-secrets-manager');
+  const sm = new SecretsManagerClient({ region: ctx.region, credentials: ctx.credentials });
+
+  const configs: any[] = [];
+  for (const sr of secretResources) {
+    const secretArn = sr.PhysicalResourceId;
+    try {
+      const desc = await sm.send(new DescribeSecretCommand({ SecretId: secretArn }));
+      // Use the secret NAME (not ARN) as the stable identifier — names are user-defined
+      // and survive re-creation; ARNs include account+region+random suffix.
+      const config: any = {
+        name: desc.Name ?? secretArn,
+      };
+      if (desc.Description) config.description = desc.Description;
+      configs.push(config);
+      console.log(`  [secrets-manager] Found: ${desc.Name}`);
+    } catch (err: any) {
+      console.log(`  [secrets-manager] Warning: could not describe ${secretArn}: ${err.message}`);
+    }
+  }
+
+  return configs;
+}
+
+async function importKms(ctx: ImportContext): Promise<any[]> {
+  const keyResources = ctx.resources.filter(r => r.ResourceType === 'AWS::KMS::Key');
+  if (keyResources.length === 0) return [];
+
+  const { KMSClient, DescribeKeyCommand, ListAliasesCommand, GetKeyRotationStatusCommand } =
+    await import('@aws-sdk/client-kms');
+  const kms = new KMSClient({ region: ctx.region, credentials: ctx.credentials });
+
+  // Build keyId → alias lookup so each key gets its alias as the stable identifier.
+  const aliasByKey = new Map<string, string>();
+  let nextMarker: string | undefined;
+  do {
+    const aliasRes = await kms.send(new ListAliasesCommand({ Marker: nextMarker, Limit: 100 }));
+    for (const a of aliasRes.Aliases ?? []) {
+      // Skip AWS-managed aliases (alias/aws/*) — we only care about user/CDK keys here.
+      if (a.AliasName?.startsWith('alias/aws/')) continue;
+      if (a.TargetKeyId && a.AliasName) {
+        aliasByKey.set(a.TargetKeyId, a.AliasName);
+      }
+    }
+    nextMarker = aliasRes.NextMarker;
+  } while (nextMarker);
+
+  const configs: any[] = [];
+  for (const kr of keyResources) {
+    const keyId = kr.PhysicalResourceId;
+    try {
+      const desc = await kms.send(new DescribeKeyCommand({ KeyId: keyId }));
+      const meta = desc.KeyMetadata;
+      if (!meta || meta.KeyState === 'PendingDeletion') continue;
+
+      let rotationEnabled = false;
+      try {
+        const rot = await kms.send(new GetKeyRotationStatusCommand({ KeyId: keyId }));
+        rotationEnabled = rot.KeyRotationEnabled ?? false;
+      } catch {
+        // Some key types don't support rotation; treat as disabled.
+      }
+
+      const aliasName = aliasByKey.get(keyId);
+      // Strip the 'alias/' prefix for the config — KmsKeyConfig.alias expects bare name.
+      const aliasBare = aliasName ? aliasName.replace(/^alias\//, '') : undefined;
+
+      const config: any = {
+        // No alias on adopted key → fall back to keyId for lookup.
+        alias: aliasBare ?? `${kr.LogicalResourceId.toLowerCase()}-key`,
+        keyId,
+        description: meta.Description,
+        enableKeyRotation: rotationEnabled,
+      };
+
+      configs.push(config);
+      console.log(`  [kms] Found key: ${aliasBare ?? keyId} (rotation=${rotationEnabled})`);
+    } catch (err: any) {
+      console.log(`  [kms] Warning: could not describe key ${keyId}: ${err.message}`);
+    }
+  }
+
+  return configs;
+}
+
 // ---------------------------------------------------------------------------
 // Config file generator
 // ---------------------------------------------------------------------------
@@ -636,9 +1128,7 @@ function generateConfigSource(config: ImportedConfig): string {
   lines.push(` * Forge will NOT delete or recreate existing resources — it adopts them in place.`);
   lines.push(` */`);
   lines.push(``);
-  lines.push(`import { defineConfig } from './src/config.js';`);
-  lines.push(`// If using from outside the forge directory, change to:`);
-  lines.push(`// import { defineConfig } from '<path-to-forge>/src/config.js';`);
+  lines.push(`import { defineConfig } from '${FORGE_CONFIG_PATH}';`);
   lines.push(``);
   lines.push(`export default defineConfig({`);
   lines.push(`  app: '${config.app}',`);
@@ -709,10 +1199,89 @@ function generateConfigSource(config: ImportedConfig): string {
     lines.push(`  ],`);
   }
 
+  // KMS
+  if (config.kms?.length) {
+    lines.push(``);
+    lines.push(`  kms: [`);
+    for (const key of config.kms) {
+      lines.push(`    ${formatObject(key, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
+  // SecretsManager (metadata only — values stay in AWS)
+  if (config.secrets?.length) {
+    lines.push(``);
+    lines.push(`  secrets: [`);
+    for (const secret of config.secrets) {
+      lines.push(`    ${formatObject(secret, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
+  // Pinpoint apps
+  if (config.pinpoint?.length) {
+    lines.push(``);
+    lines.push(`  pinpoint: [`);
+    for (const pp of config.pinpoint) {
+      lines.push(`    ${formatObject(pp, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
+  // IAM Managed Policies (standalone — distinct from per-Lambda inline policies)
+  if (config.managedPolicies?.length) {
+    lines.push(``);
+    lines.push(`  managedPolicies: [`);
+    for (const mp of config.managedPolicies) {
+      lines.push(`    ${formatObject(mp, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
+  // Standalone Security Groups
+  if (config.securityGroups?.length) {
+    lines.push(``);
+    lines.push(`  securityGroups: [`);
+    for (const sg of config.securityGroups) {
+      lines.push(`    ${formatObject(sg, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
+  // Lambda Layers (referenced by Lambda config.layers ARNs)
+  if (config.lambdaLayers?.length) {
+    lines.push(``);
+    lines.push(`  lambdaLayers: [`);
+    for (const layer of config.lambdaLayers) {
+      lines.push(`    ${formatObject(layer, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
+  // Custom EventBuses (referenced by EventBridge rules)
+  if (config.eventBuses?.length) {
+    lines.push(``);
+    lines.push(`  eventBuses: [`);
+    for (const bus of config.eventBuses) {
+      lines.push(`    ${formatObject(bus, 4)},`);
+    }
+    lines.push(`  ],`);
+  }
+
   lines.push(`});`);
   lines.push(``);
 
   return lines.join('\n');
+}
+
+/**
+ * Quote object keys that aren't valid JS identifiers (e.g. 'detail-type' in
+ * EventBridge event patterns) so the generated config parses cleanly.
+ */
+function formatKey(key: string): string {
+  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key)) return key;
+  return `'${key.replace(/'/g, "\\'")}'`;
 }
 
 function formatObject(obj: any, indent: number): string {
@@ -738,15 +1307,15 @@ function formatObject(obj: any, indent: number): string {
 
   // Short objects on one line
   if (entries.length <= 2 && entries.every(([_, v]) => typeof v !== 'object')) {
-    const pairs = entries.map(([k, v]) => `${k}: ${formatValue(v)}`);
+    const pairs = entries.map(([k, v]) => `${formatKey(k)}: ${formatValue(v)}`);
     return `{ ${pairs.join(', ')} }`;
   }
 
   const lines = entries.map(([key, value]) => {
     if (typeof value === 'object' && value !== null) {
-      return `${innerPad}${key}: ${formatObject(value, indent + 2)}`;
+      return `${innerPad}${formatKey(key)}: ${formatObject(value, indent + 2)}`;
     }
-    return `${innerPad}${key}: ${formatValue(value)}`;
+    return `${innerPad}${formatKey(key)}: ${formatValue(value)}`;
   });
 
   return `{\n${lines.join(',\n')},\n${pad}}`;
@@ -764,12 +1333,18 @@ function formatValue(val: unknown): string {
 // ---------------------------------------------------------------------------
 
 export async function importStack(
-  stackName: string,
+  stackNames: string | string[],
   profile: string,
   region: string = 'us-east-1',
   outputPath?: string
 ): Promise<string> {
-  console.log(`\nForge: importing CloudFormation stack '${stackName}'\n`);
+  // Accept single name or array — multi-stack lets apps split across CFN stacks
+  // (tanaiger has 8, ember has 5+) get merged into one forge.config.ts.
+  const stacks = Array.isArray(stackNames) ? stackNames : [stackNames];
+  if (stacks.length === 0) throw new Error('At least one stack name is required.');
+
+  const stackLabel = stacks.length === 1 ? `stack '${stacks[0]}'` : `${stacks.length} stacks (${stacks.join(', ')})`;
+  console.log(`\nForge: importing CloudFormation ${stackLabel}\n`);
   console.log(`  Profile: ${profile}`);
   console.log(`  Region:  ${region}`);
   console.log('');
@@ -788,7 +1363,11 @@ export async function importStack(
   }
 
   const ctx: ImportContext = {
-    stackName,
+    // The first stack's name is used as the canonical "stack name" for things like
+    // RDS clusterId default-derivation. For multi-stack imports, the first stack
+    // should typically be the one closest to the app's identity (e.g., Tanaiger-Api
+    // when importing Tanaiger-* together).
+    stackName: stacks[0],
     profile,
     region,
     accountId,
@@ -796,10 +1375,20 @@ export async function importStack(
     resources: [],
   };
 
-  // List all resources in the stack
-  console.log(`\n  Reading stack resources...`);
-  ctx.resources = await listStackResources(ctx);
-  console.log(`  Found ${ctx.resources.length} resources\n`);
+  // List all resources from each stack and merge. Resources are tagged with their
+  // origin stack name only via the LogicalResourceId pattern; the importers don't
+  // care about which stack a resource came from — they only care about ResourceType.
+  for (const stack of stacks) {
+    console.log(`\n  Reading resources from ${stack}...`);
+    ctx.stackName = stack;
+    const stackResources = await listStackResources(ctx);
+    ctx.resources.push(...stackResources);
+    console.log(`    Found ${stackResources.length} resources`);
+  }
+  // Restore the canonical stackName for downstream importers (they use it for
+  // default-naming heuristics, e.g. ${stackName}-aurora).
+  ctx.stackName = stacks[0];
+  console.log(`\n  Total resources across ${stacks.length} stack${stacks.length > 1 ? 's' : ''}: ${ctx.resources.length}\n`);
 
   // Group by type for summary
   const typeCounts = new Map<string, number>();
@@ -812,10 +1401,9 @@ export async function importStack(
   }
   console.log('');
 
-  // Derive app name from stack name
-  // Simple: lowercase the stack name, don't try to split camelCase
-  // (STRfish -> strfish, YeonCrm -> yeoncrm, VisibleWealth -> visiblewealth)
-  const appName = stackName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+  // Derive app name from the first stack name. For multi-stack, this picks up the
+  // first stack — user can edit the generated config's `app` field if needed.
+  const appName = stacks[0].toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
 
   console.log(`  Importing resources...\n`);
 
@@ -828,6 +1416,13 @@ export async function importStack(
 
   config.vpc = await importVpc(ctx);
   config.rds = await importRds(ctx);
+  config.kms = await importKms(ctx);
+  config.secrets = await importSecrets(ctx);
+  config.pinpoint = await importPinpoint(ctx);
+  config.managedPolicies = await importManagedPolicies(ctx);
+  config.securityGroups = await importSecurityGroups(ctx);
+  config.lambdaLayers = await importLambdaLayers(ctx);
+  config.eventBuses = await importEventBuses(ctx);
   config.cognito = await importCognito(ctx);
   config.lambda = await importLambdas(ctx);
   config.apiGateway = await importApiGateway(ctx);

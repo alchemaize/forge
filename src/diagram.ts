@@ -225,7 +225,7 @@ function buildNodes(config: ForgeConfig): DiagramNode[] {
     if (fn.handler && fn.handler !== 'index.handler') details.push(fn.handler);
     if (fn.memory && fn.memory !== 512) details.push(`${fn.memory} MB`);
 
-    const labelParts = [shortName, `Lambda (${fn.runtime ?? 'nodejs20.x'})`];
+    const labelParts = [shortName, `Lambda (${fn.runtime ?? 'nodejs22.x'})`];
     if (details.length) labelParts.push(details.join(' / '));
 
     nodes.push({

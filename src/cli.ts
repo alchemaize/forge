@@ -89,13 +89,16 @@ Examples:
       process.exit(1);
     }
 
-    const importStackName = args[stackIdx + 1];
+    // Accept comma-separated stack names so apps split across multiple CFN stacks
+    // (tanaiger has 8, ember has 5+) can be imported into a single forge.config.ts.
+    // Resources from each stack are merged before per-resource importers run.
+    const importStackNames = args[stackIdx + 1].split(',').map(s => s.trim()).filter(Boolean);
     const importProfile = args[profileIdx + 1];
     const importRegion = regionIdx >= 0 ? args[regionIdx + 1] : 'us-east-1';
     const importOutput = outputIdx >= 0 ? args[outputIdx + 1] : undefined;
 
     const { importStack: doImport } = await import('./import.js');
-    await doImport(importStackName, importProfile, importRegion, importOutput);
+    await doImport(importStackNames, importProfile, importRegion, importOutput);
     return;
   }
 

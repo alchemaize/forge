@@ -27,6 +27,13 @@ import * as cloudfront from './resources/cloudfront.js';
 import * as elasticache from './resources/elasticache.js';
 import * as stepFunctions from './resources/step-functions.js';
 import * as sqs from './resources/sqs.js';
+import * as kms from './resources/kms.js';
+import * as secrets from './resources/secrets-manager.js';
+import * as pinpoint from './resources/pinpoint.js';
+import * as iamManagedPolicy from './resources/iam-managed-policy.js';
+import * as securityGroup from './resources/security-group.js';
+import * as lambdaLayer from './resources/lambda-layer.js';
+import * as eventBus from './resources/event-bus.js';
 
 // ---------------------------------------------------------------------------
 // Plan
@@ -57,6 +64,32 @@ export async function plan(config: ForgeConfig): Promise<Plan> {
   }
   for (const ecrConfig of config.ecr ?? []) {
     await ecsExpress.planEcr(ctx, ecrConfig, config.app, p);
+  }
+  // KMS keys (referenced by Cognito CustomEmailSender, Lambda env vars, etc. — must
+  // exist before resources that grant permissions to them or store their ARN).
+  for (const kmsConfig of config.kms ?? []) {
+    await kms.planKms(ctx, kmsConfig, config.app, p);
+  }
+  // SecretsManager secrets (typically dbSecret for RDS — referenced by Lambda env vars).
+  for (const secretConfig of config.secrets ?? []) {
+    await secrets.planSecret(ctx, secretConfig, config.app, p);
+  }
+  for (const ppConfig of config.pinpoint ?? []) {
+    await pinpoint.planPinpoint(ctx, ppConfig, config.app, p);
+  }
+  // Managed policies (e.g. shared BedrockAccessPolicy attached to multiple Lambdas).
+  // Must plan/apply before Lambda since Lambda's policies array references their ARNs.
+  for (const mpConfig of config.managedPolicies ?? []) {
+    await iamManagedPolicy.planManagedPolicy(ctx, mpConfig, config.app, p);
+  }
+  for (const sgConfig of config.securityGroups ?? []) {
+    await securityGroup.planSecurityGroup(ctx, sgConfig, config.app, p, config);
+  }
+  for (const layerConfig of config.lambdaLayers ?? []) {
+    await lambdaLayer.planLayer(ctx, layerConfig, config.app, p);
+  }
+  for (const ebConfig of config.eventBuses ?? []) {
+    await eventBus.planEventBus(ctx, ebConfig, config.app, p);
   }
 
   // ElastiCache
@@ -118,6 +151,7 @@ export async function apply(config: ForgeConfig): Promise<void> {
   // Phase 1: VPC
   let vpcState: vpc.VpcState | undefined;
   if (config.vpc) {
+    console.log(`▸ Phase: VPC (${config.vpc.mode})`);
     vpcState = await vpc.applyVpc(ctx, config.vpc, config.app);
     console.log('');
   }
@@ -126,67 +160,116 @@ export async function apply(config: ForgeConfig): Promise<void> {
   let rdsState: rds.RdsState | undefined;
   if (config.rds) {
     if (!vpcState) throw new Error('RDS requires VPC config');
+    console.log(`▸ Phase: RDS (${config.rds.mode})`);
     rdsState = await rds.applyRds(ctx, config.rds, config.app, vpcState);
     console.log('');
   }
 
   // Phase 3: Independent resources
+  if (config.dynamodb?.length) console.log(`▸ Phase: DynamoDB (${config.dynamodb.length})`);
   const dynamoStates: dynamodb.DynamoTableState[] = [];
   for (const tableConfig of config.dynamodb ?? []) {
     dynamoStates.push(await dynamodb.applyDynamoTable(ctx, tableConfig, config.app));
   }
   if (dynamoStates.length) console.log('');
 
+  if (config.s3?.length) console.log(`▸ Phase: S3 (${config.s3.length})`);
   const s3States: s3.S3BucketState[] = [];
   for (const bucketConfig of config.s3 ?? []) {
     s3States.push(await s3.applyS3Bucket(ctx, bucketConfig, config.app));
   }
   if (s3States.length) console.log('');
 
+  if (config.ecr?.length) console.log(`▸ Phase: ECR (${config.ecr.length})`);
   const ecrStates: ecsExpress.EcrState[] = [];
   for (const ecrConfig of config.ecr ?? []) {
     ecrStates.push(await ecsExpress.applyEcr(ctx, ecrConfig, config.app));
   }
   if (ecrStates.length) console.log('');
 
+  if (config.kms?.length) console.log(`▸ Phase: KMS (${config.kms.length})`);
+  const kmsStates: kms.KmsState[] = [];
+  for (const kmsConfig of config.kms ?? []) {
+    kmsStates.push(await kms.applyKms(ctx, kmsConfig, config.app));
+  }
+  if (kmsStates.length) console.log('');
+
+  if (config.secrets?.length) console.log(`▸ Phase: SecretsManager (${config.secrets.length})`);
+  for (const secretConfig of config.secrets ?? []) {
+    await secrets.applySecret(ctx, secretConfig, config.app);
+  }
+  if (config.secrets?.length) console.log('');
+
+  if (config.pinpoint?.length) console.log(`▸ Phase: Pinpoint (${config.pinpoint.length})`);
+  for (const ppConfig of config.pinpoint ?? []) {
+    await pinpoint.applyPinpoint(ctx, ppConfig, config.app);
+  }
+  if (config.pinpoint?.length) console.log('');
+
+  if (config.managedPolicies?.length) console.log(`▸ Phase: ManagedPolicy (${config.managedPolicies.length})`);
+  for (const mpConfig of config.managedPolicies ?? []) {
+    await iamManagedPolicy.applyManagedPolicy(ctx, mpConfig, config.app);
+  }
+  if (config.managedPolicies?.length) console.log('');
+
+  if (config.securityGroups?.length) console.log(`▸ Phase: SecurityGroups (${config.securityGroups.length})`);
+  // Track SG name → GroupId so cross-SG references (e.g. dbSg.ingress.sourceSg = 'lambdaSg')
+  // resolve as the loop progresses. Order in config.securityGroups matters: dependent SGs
+  // must come after their referenced SGs.
+  const sgNameMap = new Map<string, string>();
+  for (const sgConfig of config.securityGroups ?? []) {
+    await securityGroup.applySecurityGroup(ctx, sgConfig, config.app, config, sgNameMap);
+  }
+  if (config.securityGroups?.length) console.log('');
+
+  if (config.lambdaLayers?.length) console.log(`▸ Phase: LambdaLayers (${config.lambdaLayers.length})`);
+  for (const layerConfig of config.lambdaLayers ?? []) {
+    await lambdaLayer.applyLayer(ctx, layerConfig, config.app);
+  }
+  if (config.lambdaLayers?.length) console.log('');
+
+  if (config.eventBuses?.length) console.log(`▸ Phase: EventBuses (${config.eventBuses.length})`);
+  for (const ebConfig of config.eventBuses ?? []) {
+    await eventBus.applyEventBus(ctx, ebConfig, config.app);
+  }
+  if (config.eventBuses?.length) console.log('');
+
   // Phase 4: Cognito
   const cognitoConfigs = config.cognito
     ? (Array.isArray(config.cognito) ? config.cognito : [config.cognito])
     : [];
+  if (cognitoConfigs.length) console.log(`▸ Phase: Cognito (${cognitoConfigs.length} pool${cognitoConfigs.length > 1 ? 's' : ''})`);
   const cognitoStates: cognito.CognitoState[] = [];
   for (const cognitoConfig of cognitoConfigs) {
     const state = await cognito.applyCognito(ctx, cognitoConfig, config.app);
     if (state) cognitoStates.push(state);
   }
-  const cognitoState = cognitoStates[0]; // Primary pool for Lambda env auto-population
+  const cognitoState = cognitoStates[0]; // Default pool for Lambda env auto-population (single-pool apps only)
   if (cognitoStates.length) console.log('');
 
   // Phase 5: Lambda
+  if (config.lambda?.length) console.log(`▸ Phase: Lambda (${config.lambda.length})`);
   const lambdaStates: lambda.LambdaState[] = [];
   for (const lambdaConfig of config.lambda ?? []) {
-    // Auto-populate env vars from other resources
-    const env = { ...lambdaConfig.env };
-    if (cognitoState) {
-      env.COGNITO_USER_POOL_ID ??= cognitoState.userPoolId;
-      env.COGNITO_CLIENT_ID ??= cognitoState.clients[0]?.clientId ?? '';
-    }
-    if (rdsState) {
-      const dbHost = rdsState.proxyEndpoint ?? rdsState.clusterEndpoint ?? rdsState.instanceEndpoint ?? '';
-      env.DB_HOST ??= dbHost;
-      env.DB_PORT ??= String(rdsState.port);
-      env.DB_NAME ??= rdsState.dbName;
-    }
-    env.AWS_REGION ??= ctx.region;
-    env.NODE_ENV ??= 'production';
-
-    const configWithEnv = { ...lambdaConfig, env };
-    lambdaStates.push(await lambda.applyLambda(ctx, configWithEnv, config.app, vpcState));
+    // No engine-level env auto-population.
+    //
+    // Older Forge auto-injected COGNITO_USER_POOL_ID, DB_HOST, DB_PORT, DB_NAME, NODE_ENV
+    // when other resources were defined in the config. That's helpful for greenfield apps
+    // where Forge owns everything, but it caused real drift when adopting CDK-managed
+    // Lambdas (CDK source didn't have these vars; Forge added them on apply; future
+    // cdk deploys would then wipe them). The drift hit visiblewealth on 2026-04-29.
+    //
+    // Now: config.env is the truth. Whatever's there gets merged with the live function's
+    // existing env via applyLambda. Nothing implicit. Users who want auto-population can
+    // add the vars to their config explicitly (one line each).
+    lambdaStates.push(await lambda.applyLambda(ctx, lambdaConfig, config.app, vpcState));
   }
   if (lambdaStates.length) console.log('');
 
   // Phase 6: API Gateway
   let apiGwState: apiGateway.ApiGatewayState | undefined;
   if (config.apiGateway && lambdaStates.length > 0) {
+    console.log('▸ Phase: API Gateway');
     apiGwState = await apiGateway.applyApiGateway(
       ctx,
       config.apiGateway,
@@ -198,27 +281,32 @@ export async function apply(config: ForgeConfig): Promise<void> {
   }
 
   // Phase 7: ECS Express
+  if (config.ecsExpress?.length) console.log(`▸ Phase: ECS Express (${config.ecsExpress.length})`);
   for (const ecsConfig of config.ecsExpress ?? []) {
     const ecrState = ecrStates.find(e => e.repoName === (ecsConfig.ecrRepo ?? ecsConfig.name));
     await ecsExpress.applyEcsExpress(ctx, ecsConfig, config.app, ecrState);
   }
 
   // Phase 8: CloudFront
+  if (config.cloudfront?.length) console.log(`▸ Phase: CloudFront (${config.cloudfront.length})`);
   for (const cfConfig of config.cloudfront ?? []) {
     await cloudfront.applyCloudFront(ctx, cfConfig, config.app);
   }
 
   // Phase 9: ElastiCache
   if (config.elasticache) {
+    console.log('▸ Phase: ElastiCache');
     await elasticache.applyElastiCache(ctx, config.elasticache, config.app);
   }
 
   // Phase 10: Step Functions
+  if (config.stepFunctions?.length) console.log(`▸ Phase: Step Functions (${config.stepFunctions.length})`);
   for (const sfConfig of config.stepFunctions ?? []) {
     await stepFunctions.applyStepFunction(ctx, sfConfig, config.app);
   }
 
   // Phase 11: SQS
+  if (config.sqs?.length) console.log(`▸ Phase: SQS (${config.sqs.length})`);
   for (const sqsConfig of config.sqs ?? []) {
     await sqs.applySqs(ctx, sqsConfig, config.app);
   }

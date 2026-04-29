@@ -50,7 +50,7 @@ export default defineConfig({
   lambda: [
     {
       name: 'strfish-api',
-      runtime: 'nodejs20.x',
+      runtime: 'nodejs22.x',
       memory: 512,
       timeout: 30,
       architecture: 'arm64',
@@ -67,7 +67,7 @@ export default defineConfig({
     },
     {
       name: 'strfish-pre-token-generation',
-      runtime: 'nodejs20.x',
+      runtime: 'nodejs22.x',
       memory: 128,
       timeout: 5,
       architecture: 'arm64',
@@ -75,7 +75,7 @@ export default defineConfig({
     },
     {
       name: 'strfish-post-confirmation',
-      runtime: 'nodejs20.x',
+      runtime: 'nodejs22.x',
       memory: 128,
       timeout: 10,
       architecture: 'arm64',

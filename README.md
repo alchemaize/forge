@@ -216,7 +216,7 @@ export default defineConfig({
 
   lambda: [{
     name: 'myapp-api',
-    runtime: 'nodejs20.x',
+    runtime: 'nodejs22.x',
     memory: 512,
     timeout: 30,
     vpc: true,

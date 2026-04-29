@@ -90,6 +90,11 @@ export interface CognitoTriggerConfig {
   postConfirmation?: string;     // Lambda function name or ARN
   preSignUp?: string;
   customMessage?: string;
+  /** Lambda function name or ARN. Sends Cognito verification emails (replaces SES default). */
+  customEmailSender?: string;
+  /** KMS key ARN. Required when customEmailSender is set — Cognito uses this to
+   * encrypt the verification code that gets sent to the CustomEmailSender Lambda. */
+  customSenderKmsKey?: string;
 }
 
 export interface CognitoConfig {
@@ -113,6 +118,18 @@ export interface CognitoConfig {
   };
   /** MFA setting */
   mfa?: 'OFF' | 'OPTIONAL' | 'REQUIRED';
+  /** Custom user attributes (added to the pool Schema). Cognito stores these
+   * with a 'custom:' prefix on user objects. Cognito doesn't allow modifying or
+   * removing schema attributes after creation — Forge can ADD missing ones to an
+   * existing pool but won't try to alter or delete existing attributes. */
+  customAttributes?: Array<{
+    name: string;
+    type?: 'String' | 'Number' | 'DateTime' | 'Boolean';
+    mutable?: boolean;
+    required?: boolean;
+  }>;
+  /** Account recovery preferences. EMAIL_ONLY is the most common. */
+  accountRecovery?: 'EMAIL_ONLY' | 'PHONE_ONLY' | 'PHONE_AND_EMAIL' | 'EMAIL_AND_PHONE';
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +143,7 @@ export interface LambdaFunctionConfig {
   entry?: string;
   /** Handler (default: index.handler) */
   handler?: string;
-  /** Runtime (default: nodejs20.x) */
+  /** Runtime (default: nodejs22.x) */
   runtime?: string;
   /** Memory MB (default: 512) */
   memory?: number;
@@ -138,16 +155,82 @@ export interface LambdaFunctionConfig {
   env?: Record<string, string>;
   /** Place in VPC (default: false) */
   vpc?: boolean;
-  /** Additional IAM policy ARNs */
+  /**
+   * Existing IAM role ARN to use for this function.
+   * When set, Forge skips role creation/lookup and uses this ARN directly.
+   * Required when adopting CDK-managed functions whose roles don't follow
+   * the {functionName}-role naming convention. Without this, Forge would
+   * create a fresh role and silently swap the function over to it on apply,
+   * losing all custom permissions.
+   */
+  roleArn?: string;
+  /** Managed policy ARNs to attach to the role. Forge syncs these additively
+   * (attaches missing ones, never detaches policies not in config). */
   policies?: string[];
-  /** Inline IAM policy statements */
-  inlinePolicies?: Array<{
-    effect: 'Allow' | 'Deny';
-    actions: string[];
-    resources: string[];
-  }>;
+  /**
+   * Inline IAM policies to put on the role.
+   *
+   * Supports two forms (mix freely):
+   *
+   * 1. Named policy with multiple statements (preferred — can fully own CDK-named policies):
+   *      { name: 'MyPolicy', statements: [{ effect: 'Allow', actions: [...], resources: [...] }] }
+   *
+   * 2. Flat single statement (backward-compat — auto-grouped under a 'forge-inline' policy):
+   *      { effect: 'Allow', actions: [...], resources: [...] }
+   *
+   * On apply, named-form entries are PutRolePolicy'd by their explicit name; flat-form
+   * entries are merged into a single 'forge-inline' policy. CFN-named policies that
+   * Forge captures via import are written in the named form so they round-trip cleanly.
+   */
+  inlinePolicies?: Array<
+    | {
+        name: string;
+        statements: Array<{
+          sid?: string;
+          effect: 'Allow' | 'Deny';
+          actions: string[];
+          resources: string[];
+          conditions?: Record<string, unknown>;
+          principal?: unknown;
+        }>;
+      }
+    | {
+        effect: 'Allow' | 'Deny';
+        actions: string[];
+        resources: string[];
+      }
+  >;
   /** Layers (ARNs) */
   layers?: string[];
+  /** Function URL configuration. When set, Forge ensures the URL exists with the
+   * specified auth + CORS. When unset, Forge leaves any existing URL alone (adoption
+   * preserves whatever's there). Forge never deletes a URL even if config changes. */
+  functionUrl?: {
+    /** Auth type: NONE for public, AWS_IAM for IAM-signed requests. Default: NONE */
+    authType?: 'NONE' | 'AWS_IAM';
+    /** CORS configuration for browser clients */
+    cors?: {
+      allowOrigins?: string[];
+      allowMethods?: string[];
+      allowHeaders?: string[];
+      allowCredentials?: boolean;
+      maxAge?: number;
+      exposeHeaders?: string[];
+    };
+  };
+  /** Event source mappings (SQS, Kinesis, DynamoDB Streams → Lambda).
+   * When set, Forge ensures mappings exist with the specified batch size etc.
+   * Adoption-safe: existing mappings not in config are preserved (no auto-delete). */
+  eventSources?: Array<{
+    /** Source ARN (e.g. arn:aws:sqs:us-east-1:123:my-queue) */
+    source: string;
+    /** Batch size (default depends on source: 10 for SQS, 100 for Kinesis/Dynamo) */
+    batchSize?: number;
+    /** Max batching window in seconds (0-300, default 0) */
+    maximumBatchingWindowInSeconds?: number;
+    /** Enable partial batch failure reporting (SQS only). Default: false */
+    reportBatchItemFailures?: boolean;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +311,10 @@ export interface S3BucketConfig {
   };
   /** Enable versioning */
   versioning?: boolean;
+  /** Bucket policy as a parsed JSON object (Version + Statement array).
+   * When set, Forge ensures the bucket has this policy. When unset, Forge leaves
+   * any existing policy alone. Parsed object form (not string) for cleaner diffs. */
+  policy?: object;
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +564,141 @@ export interface CloudWatchAlarmConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Lambda Layer (standalone — referenced by Lambda config.layers ARNs)
+// ---------------------------------------------------------------------------
+
+export interface LambdaLayerConfig {
+  /** Layer name (used as the AWS-side identifier) */
+  name: string;
+  /** Description (set on each new version) */
+  description?: string;
+  /** Compatible runtimes (e.g. ['nodejs22.x']). Used on PublishLayerVersion. */
+  compatibleRuntimes?: string[];
+  /** Compatible architectures (default: ['x86_64', 'arm64']) */
+  compatibleArchitectures?: ('x86_64' | 'arm64')[];
+  /** Path to a local zip file to upload as the layer content. Required to
+   * PublishLayerVersion; without it Forge can only adopt-by-describe. */
+  zipPath?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Custom EventBus
+// ---------------------------------------------------------------------------
+
+export interface EventBusConfig {
+  /** Bus name. The default bus is named 'default' and isn't manageable here —
+   * Forge creates user-defined buses only. */
+  name: string;
+}
+
+// ---------------------------------------------------------------------------
+// Security Group (standalone — distinct from auto-created VPC SG chain)
+// ---------------------------------------------------------------------------
+
+export interface SecurityGroupRule {
+  /** IP protocol (tcp, udp, icmp, or -1 for all) */
+  protocol: 'tcp' | 'udp' | 'icmp' | '-1';
+  /** Port range start (omit for all ports / icmp) */
+  fromPort?: number;
+  /** Port range end (omit to use fromPort) */
+  toPort?: number;
+  /** IPv4 CIDR block (e.g. '10.0.0.0/16'). Mutually exclusive with sourceSg. */
+  cidrIp?: string;
+  /** Source security group name (resolved to GroupId at apply time). */
+  sourceSg?: string;
+  /** Optional description (helpful for debugging which rule is which) */
+  description?: string;
+}
+
+export interface SecurityGroupConfig {
+  /** Security group name (Forge looks up by name within the VPC) */
+  name: string;
+  /** Human description (required by AWS) */
+  description: string;
+  /** VPC ID. Defaults to config.vpc.vpcId if available. */
+  vpcId?: string;
+  /** Inbound rules */
+  ingress?: SecurityGroupRule[];
+  /** Outbound rules. AWS adds a default allow-all egress on create; Forge replaces
+   * with the config rules if specified, leaves the default if not. */
+  egress?: SecurityGroupRule[];
+}
+
+// ---------------------------------------------------------------------------
+// IAM Managed Policy (standalone, not Lambda role inline)
+// ---------------------------------------------------------------------------
+
+export interface IamManagedPolicyConfig {
+  /** Policy name (used as the AWS-side identifier — Forge looks it up by name) */
+  name: string;
+  /** Description (used on create + update if it differs) */
+  description?: string;
+  /**
+   * Policy document as a parsed JSON object: { Version, Statement: [...] }.
+   * Forge stringifies before sending to IAM. CreatePolicy on first apply,
+   * CreatePolicyVersion (with SetAsDefault) on subsequent updates if the
+   * document drifts. Old non-default versions are pruned to stay under the
+   * 5-version-per-policy IAM limit.
+   */
+  document: object;
+}
+
+// ---------------------------------------------------------------------------
+// Pinpoint (mobile push / analytics)
+// ---------------------------------------------------------------------------
+
+export interface PinpointAppConfig {
+  /** Pinpoint application name (used for lookup and create) */
+  name: string;
+}
+
+// ---------------------------------------------------------------------------
+// SecretsManager
+// ---------------------------------------------------------------------------
+
+export interface SecretConfig {
+  /** Secret name (e.g. 'visible-wealth/aurora-credentials') */
+  name: string;
+  /** Description (used on update if it differs) */
+  description?: string;
+  /**
+   * Note on secret values:
+   *   Forge does NOT capture, log, or modify secret values. They live in AWS only,
+   *   set out-of-band (CDK, Console, CLI, rotation). Forge manages metadata only:
+   *   name, description, tags. The actual value is owned by whoever set it last.
+   */
+}
+
+// ---------------------------------------------------------------------------
+// KMS
+// ---------------------------------------------------------------------------
+
+export interface KmsKeyConfig {
+  /**
+   * Alias name (without the 'alias/' prefix). Used for lookup and for create.
+   * For adopted keys, alias is the stable identifier — physical key IDs (UUIDs)
+   * change if a key is rotated/recreated, but aliases survive.
+   */
+  alias: string;
+  /**
+   * Existing key ID (UUID) for adoption when no alias is set on the key.
+   * Optional — alias-based lookup is preferred.
+   */
+  keyId?: string;
+  /** Description (used on create; updated on existing key if it differs) */
+  description?: string;
+  /** Enable automatic key rotation (default: true) */
+  enableKeyRotation?: boolean;
+  /**
+   * Note on key policy:
+   *   Forge does NOT modify the key policy on adopted keys by default. KMS PutKeyPolicy
+   *   is full-replace and a wrong policy can lock everyone out of the key (including the
+   *   account root). Treat policy updates as manual operations via AWS Console or CLI.
+   *   This may be revisited later with a `policy` field that explicitly opts in.
+   */
+}
+
+// ---------------------------------------------------------------------------
 // Top-level config
 // ---------------------------------------------------------------------------
 
@@ -508,6 +730,13 @@ export interface ForgeConfig {
   stepFunctions?: StepFunctionConfig[];
   sqs?: SqsQueueConfig[];
   alarms?: CloudWatchAlarmConfig[];
+  kms?: KmsKeyConfig[];
+  secrets?: SecretConfig[];
+  pinpoint?: PinpointAppConfig[];
+  managedPolicies?: IamManagedPolicyConfig[];
+  securityGroups?: SecurityGroupConfig[];
+  lambdaLayers?: LambdaLayerConfig[];
+  eventBuses?: EventBusConfig[];
 }
 
 /**
