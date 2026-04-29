@@ -66,6 +66,19 @@ export interface RdsState {
   proxyEndpoint?: string;
   proxyArn?: string;
   parameterGroupName: string;
+  /** Engine version, e.g., "16.4". Used for drift detection. */
+  engineVersion: string;
+  /** Aurora-only: serverless v2 capacity range. */
+  minCapacity?: number;
+  maxCapacity?: number;
+  /** Standard RDS only: instance class, e.g., "db.t4g.micro". */
+  instanceClass?: string;
+  /** Standard RDS only: allocated storage in GB. */
+  allocatedStorage?: number;
+  /** Whether deletion protection is on. Aurora and standard RDS both expose this. */
+  deletionProtection: boolean;
+  /** Days of backup retention. */
+  backupRetentionPeriod: number;
 }
 
 function generatePassword(): string {
@@ -126,6 +139,11 @@ export async function describeRds(
         proxyEndpoint,
         proxyArn,
         parameterGroupName: cluster.DBClusterParameterGroup ?? '',
+        engineVersion: cluster.EngineVersion ?? '',
+        minCapacity: cluster.ServerlessV2ScalingConfiguration?.MinCapacity,
+        maxCapacity: cluster.ServerlessV2ScalingConfiguration?.MaxCapacity,
+        deletionProtection: cluster.DeletionProtection ?? false,
+        backupRetentionPeriod: cluster.BackupRetentionPeriod ?? 1,
       };
     } catch (err: any) {
       if (err.name === 'DBClusterNotFoundFault') return null;
@@ -147,6 +165,11 @@ export async function describeRds(
         dbName: instance.DBName ?? config.dbName,
         masterUsername: instance.MasterUsername ?? `${appName}_admin`,
         parameterGroupName: instance.DBParameterGroups?.[0]?.DBParameterGroupName ?? '',
+        engineVersion: instance.EngineVersion ?? '',
+        instanceClass: instance.DBInstanceClass,
+        allocatedStorage: instance.AllocatedStorage,
+        deletionProtection: instance.DeletionProtection ?? false,
+        backupRetentionPeriod: instance.BackupRetentionPeriod ?? 1,
       };
     } catch (err: any) {
       if (err.name === 'DBInstanceNotFoundFault') return null;
@@ -172,12 +195,37 @@ export async function planRds(
     : (config.clusterId ?? `${appName}-db`);
 
   if (current) {
-    // Check for drift
+    // Drift detection. Only call out fields the user explicitly set in
+    // config; AWS-default values are left alone to avoid pestering.
     const fields: Array<{ field: string; current: unknown; desired: unknown }> = [];
 
+    // Engine version (major bumps require backups; minor are routine).
+    if (config.engineVersion && current.engineVersion && current.engineVersion !== config.engineVersion) {
+      fields.push({ field: 'engineVersion', current: current.engineVersion, desired: config.engineVersion });
+    }
+
     if (mode === 'aurora-serverless-v2') {
-      // Could check min/max capacity, engine version, etc.
-      // For now, just report unchanged
+      if (config.minCapacity !== undefined && current.minCapacity !== config.minCapacity) {
+        fields.push({ field: 'minCapacity', current: current.minCapacity, desired: config.minCapacity });
+      }
+      if (config.maxCapacity !== undefined && current.maxCapacity !== config.maxCapacity) {
+        fields.push({ field: 'maxCapacity', current: current.maxCapacity, desired: config.maxCapacity });
+      }
+    } else {
+      if (config.instanceClass && current.instanceClass !== config.instanceClass) {
+        fields.push({ field: 'instanceClass', current: current.instanceClass, desired: config.instanceClass });
+      }
+      if (config.storage !== undefined && current.allocatedStorage !== config.storage) {
+        fields.push({ field: 'allocatedStorage', current: current.allocatedStorage, desired: config.storage });
+      }
+    }
+
+    if (config.deletionProtection !== undefined && current.deletionProtection !== config.deletionProtection) {
+      fields.push({ field: 'deletionProtection', current: current.deletionProtection, desired: config.deletionProtection });
+    }
+
+    if (config.backupRetention !== undefined && current.backupRetentionPeriod !== config.backupRetention) {
+      fields.push({ field: 'backupRetention', current: current.backupRetentionPeriod, desired: config.backupRetention });
     }
 
     if (config.proxy && !current.proxyEndpoint) {
@@ -393,20 +441,125 @@ async function ensureProxyRole(
   return createRes.Role!.Arn!;
 }
 
+/**
+ * Apply ModifyDBCluster / ModifyDBInstance for any field that drifts.
+ * Called from applyRds when the resource already exists. AWS schedules
+ * these changes at the next maintenance window unless `ApplyImmediately`
+ * is set; we apply immediately because the dev workspace has no formal
+ * maintenance windows and the user expects forge apply to take effect.
+ *
+ * Major engine version changes are not auto-applied: AWS requires
+ * `AllowMajorVersionUpgrade` and a backup, and the user almost certainly
+ * wants to review that before it happens. Plan still shows the drift so
+ * they know it exists.
+ */
+async function applyRdsModifications(
+  rds: RDSClient,
+  config: RdsConfig,
+  existing: RdsState
+): Promise<void> {
+  const mode = config.mode ?? 'aurora-serverless-v2';
+
+  // Compute drift (mirrors planRds).
+  const drifts: string[] = [];
+  const isMajorBump = (cur: string, des: string): boolean => {
+    const curMajor = cur.split('.')[0];
+    const desMajor = des.split('.')[0];
+    return curMajor !== desMajor;
+  };
+
+  if (mode === 'aurora-serverless-v2' && existing.clusterId) {
+    const params: any = { DBClusterIdentifier: existing.clusterId, ApplyImmediately: true };
+    if (config.minCapacity !== undefined && existing.minCapacity !== config.minCapacity) {
+      params.ServerlessV2ScalingConfiguration = {
+        ...(params.ServerlessV2ScalingConfiguration ?? {}),
+        MinCapacity: config.minCapacity,
+        MaxCapacity: config.maxCapacity ?? existing.maxCapacity ?? 4,
+      };
+      drifts.push(`minCapacity=${config.minCapacity}`);
+    }
+    if (config.maxCapacity !== undefined && existing.maxCapacity !== config.maxCapacity) {
+      params.ServerlessV2ScalingConfiguration = {
+        ...(params.ServerlessV2ScalingConfiguration ?? {}),
+        MinCapacity: config.minCapacity ?? existing.minCapacity ?? 0.5,
+        MaxCapacity: config.maxCapacity,
+      };
+      drifts.push(`maxCapacity=${config.maxCapacity}`);
+    }
+    if (config.engineVersion && existing.engineVersion && existing.engineVersion !== config.engineVersion) {
+      if (isMajorBump(existing.engineVersion, config.engineVersion)) {
+        console.log(`[rds] ${existing.clusterId}: engine version drift (${existing.engineVersion} -> ${config.engineVersion}). Major upgrades require manual review; skipping. Run 'aws rds modify-db-cluster --allow-major-version-upgrade' to apply.`);
+      } else {
+        params.EngineVersion = config.engineVersion;
+        drifts.push(`engineVersion=${config.engineVersion}`);
+      }
+    }
+    if (config.deletionProtection !== undefined && existing.deletionProtection !== config.deletionProtection) {
+      params.DeletionProtection = config.deletionProtection;
+      drifts.push(`deletionProtection=${config.deletionProtection}`);
+    }
+    if (config.backupRetention !== undefined && existing.backupRetentionPeriod !== config.backupRetention) {
+      params.BackupRetentionPeriod = config.backupRetention;
+      drifts.push(`backupRetention=${config.backupRetention}`);
+    }
+    if (drifts.length > 0) {
+      console.log(`[rds] Modifying cluster ${existing.clusterId}: ${drifts.join(', ')}`);
+      await rds.send(new ModifyDBClusterCommand(params));
+    }
+  } else if (mode === 'instance' && existing.instanceId) {
+    const params: any = { DBInstanceIdentifier: existing.instanceId, ApplyImmediately: true };
+    if (config.instanceClass && existing.instanceClass !== config.instanceClass) {
+      params.DBInstanceClass = config.instanceClass;
+      drifts.push(`instanceClass=${config.instanceClass}`);
+    }
+    if (config.storage !== undefined && existing.allocatedStorage !== config.storage) {
+      params.AllocatedStorage = config.storage;
+      drifts.push(`allocatedStorage=${config.storage}`);
+    }
+    if (config.engineVersion && existing.engineVersion && existing.engineVersion !== config.engineVersion) {
+      if (isMajorBump(existing.engineVersion, config.engineVersion)) {
+        console.log(`[rds] ${existing.instanceId}: engine version drift (${existing.engineVersion} -> ${config.engineVersion}). Major upgrades require manual review; skipping.`);
+      } else {
+        params.EngineVersion = config.engineVersion;
+        drifts.push(`engineVersion=${config.engineVersion}`);
+      }
+    }
+    if (config.deletionProtection !== undefined && existing.deletionProtection !== config.deletionProtection) {
+      params.DeletionProtection = config.deletionProtection;
+      drifts.push(`deletionProtection=${config.deletionProtection}`);
+    }
+    if (config.backupRetention !== undefined && existing.backupRetentionPeriod !== config.backupRetention) {
+      params.BackupRetentionPeriod = config.backupRetention;
+      drifts.push(`backupRetention=${config.backupRetention}`);
+    }
+    if (drifts.length > 0) {
+      console.log(`[rds] Modifying instance ${existing.instanceId}: ${drifts.join(', ')}`);
+      await rds.send(new ModifyDBInstanceCommand(params));
+    }
+  }
+}
+
 export async function applyRds(
   ctx: AwsContext,
   config: RdsConfig,
   appName: string,
   vpcState: VpcState
 ): Promise<RdsState> {
-  const existing = await describeRds(ctx, config, appName);
-  if (existing && (existing.proxyEndpoint || config.proxy === false)) {
-    console.log(`[rds] ${existing.clusterId ?? existing.instanceId} — no changes needed`);
-    return existing;
-  }
-
   const rds = getClient(ctx, RDSClient);
+  const existing = await describeRds(ctx, config, appName);
   const mode = config.mode ?? 'aurora-serverless-v2';
+
+  // If the resource exists, apply modifications for fields that drift,
+  // then proceed (or return early if the proxy state is also satisfied).
+  // Earlier the function early-returned without ever touching capacity,
+  // engine version, or deletion protection on existing resources.
+  if (existing) {
+    await applyRdsModifications(rds, config, existing);
+    if (existing.proxyEndpoint || config.proxy === false) {
+      console.log(`[rds] ${existing.clusterId ?? existing.instanceId} — modifications applied`);
+      return existing;
+    }
+  }
   const engineVersion = config.engineVersion ?? (mode === 'aurora-serverless-v2' ? '16.4' : '15');
   const forceSsl = config.forceSsl ?? true;
   const masterUsername = config.masterUsername ?? `${appName}_admin`;
@@ -495,6 +648,11 @@ export async function applyRds(
           masterUsername,
           secretArn,
           parameterGroupName: paramGroupName,
+          engineVersion,
+          minCapacity: config.minCapacity,
+          maxCapacity: config.maxCapacity,
+          deletionProtection: config.deletionProtection ?? false,
+          backupRetentionPeriod: config.backupRetention ?? 7,
         };
       }
 
@@ -533,6 +691,11 @@ export async function applyRds(
         proxyEndpoint,
         proxyArn,
         parameterGroupName: paramGroupName,
+        engineVersion,
+        minCapacity: config.minCapacity,
+        maxCapacity: config.maxCapacity,
+        deletionProtection: config.deletionProtection ?? false,
+        backupRetentionPeriod: config.backupRetention ?? 7,
       };
     }
 
@@ -602,6 +765,11 @@ export async function applyRds(
       dbName: config.dbName,
       masterUsername,
       parameterGroupName: paramGroupName,
+      engineVersion,
+      instanceClass: config.instanceClass,
+      allocatedStorage: config.storage,
+      deletionProtection: config.deletionProtection ?? false,
+      backupRetentionPeriod: config.backupRetention ?? 1,
     };
   }
 

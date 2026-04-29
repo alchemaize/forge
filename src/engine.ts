@@ -266,6 +266,18 @@ export async function apply(config: ForgeConfig): Promise<void> {
   }
   if (lambdaStates.length) console.log('');
 
+  // Phase 5b: Cognito triggers (deferred from Phase 4).
+  // Triggers reference Lambdas by ARN. On a greenfield apply the Lambdas
+  // don't exist yet during Phase 4, so trigger attachment + invoke-permission
+  // grant has to happen here, after every Lambda is up. On a clean re-apply
+  // this is mostly a no-op (Cognito's LambdaConfig already matches and the
+  // GetPolicy check skips dedupe).
+  if (cognitoStates.length) {
+    for (let i = 0; i < cognitoConfigs.length; i++) {
+      await cognito.applyCognitoTriggers(ctx, cognitoConfigs[i], cognitoStates[i]);
+    }
+  }
+
   // Phase 6: API Gateway
   let apiGwState: apiGateway.ApiGatewayState | undefined;
   if (config.apiGateway && lambdaStates.length > 0) {

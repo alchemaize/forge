@@ -224,47 +224,18 @@ export async function applyEcsExpress(
     return current;
   }
 
-  // ECS Express Mode uses create-express-gateway-service
-  const { execSync } = await import('child_process');
-  const ecrRepo = config.ecrRepo ?? ecrState?.repoUri;
-  if (!ecrRepo) {
-    throw new Error('ECS Express requires an ECR repo URI. Configure ecr or set ecsExpress.ecrRepo.');
-  }
-
-  const image = `${ecrRepo}:latest`;
-  const cpu = config.cpu ?? 512;
-  const memory = config.memory ?? 1024;
-  const port = config.port ?? 8080;
-  const healthCheckPath = config.healthCheckPath ?? '/health';
-
-  console.log(`[ecs-express] Creating service: ${config.name}`);
-  console.log(`[ecs-express] Image: ${image}, CPU: ${cpu}, Memory: ${memory}`);
-
-  try {
-    const result = execSync(
-      `aws ecs create-express-gateway-service ` +
-      `--service-name '${config.name}' ` +
-      `--cpu ${cpu} --memory ${memory} ` +
-      `--networking '{"assignPublicIp":"${config.publicIp !== false ? 'ENABLED' : 'DISABLED'}"}' ` +
-      `--primary-container '{"image":"${image}","port":${port},"healthCheckPath":"${healthCheckPath}"}' ` +
-      `--profile '${ctx.profile}' --region '${ctx.region}' ` +
-      `--query 'service.serviceArn' --output text`,
-      { encoding: 'utf-8' }
-    ).trim();
-
-    console.log(`[ecs-express] Created: ${result}`);
-    return {
-      serviceName: config.name,
-      serviceArn: result,
-      status: 'ACTIVE',
-    };
-  } catch (err: any) {
-    console.log(`[ecs-express] Note: Service may need a valid image in ECR first.`);
-    console.log(`[ecs-express] Push an image to ${ecrRepo} and re-run forge apply.`);
-    return {
-      serviceName: config.name,
-      serviceArn: 'PENDING',
-      status: 'PENDING',
-    };
-  }
+  // The earlier implementation shelled out to `aws ecs create-express-gateway-service`,
+  // which is not a real AWS CLI command. ECS doesn't have an "Express Mode service"
+  // API at the SDK level; the so-called Express Mode is a managed packaging on top
+  // of regular ECS service + Fargate + ALB + autoscaling. Real create requires
+  // CreateService + RegisterTaskDefinition + ALB target group, which is on the
+  // roadmap as a proper full-ECS module.
+  //
+  // Until that lands, refuse explicitly so users aren't silently left with a
+  // PENDING stub.
+  throw new Error(
+    `[ecs-express] ${config.name}: native create is not implemented.\n` +
+    `Provision the ECS service via Console / CDK / CLI, then re-run 'forge import' to capture it.\n` +
+    `A proper full-ECS module (CreateService + RegisterTaskDefinition + ALB) is on the roadmap.`
+  );
 }

@@ -177,9 +177,8 @@ export async function applySecurityGroup(
 
   if (sgNameMap) sgNameMap.set(config.name, current.groupId);
 
-  // Ingress: authorize each rule. AWS rejects duplicates with InvalidPermission.Duplicate
-  // — catch + ignore so apply is idempotent. (Full sync with revoke-extras is more complex
-  // and rare; users adding new rules is the common case.)
+  // Ingress: authorize each rule. AWS rejects duplicates with
+  // InvalidPermission.Duplicate, so the catch is the idempotency mechanism.
   for (const rule of config.ingress ?? []) {
     const sourceSgId = rule.sourceSg ? sgNameMap?.get(rule.sourceSg) : undefined;
     if (rule.sourceSg && !sourceSgId) {
@@ -213,9 +212,154 @@ export async function applySecurityGroup(
     }
   }
 
+  // Optional: revoke any live rule that's not in config. Off by default
+  // for adoption safety — Forge won't yank rules it didn't know about.
+  // Turn on for security-critical groups where config is the source of
+  // truth (public ALB ingress, sensitive bastion ingress, etc.).
+  if (config.pruneRules) {
+    await pruneExtraRules(ec2, current.groupId, config, sgNameMap);
+  }
+
   return current;
 }
 
-// Suppress unused-import warning
-void RevokeSecurityGroupIngressCommand;
-void RevokeSecurityGroupEgressCommand;
+/**
+ * Compare live ingress/egress rules to the config and revoke anything
+ * not declared. Compares structurally on (protocol, fromPort, toPort,
+ * cidrIp, sourceGroupId). Revokes are idempotent.
+ */
+async function pruneExtraRules(
+  ec2: EC2Client,
+  groupId: string,
+  config: SecurityGroupConfig,
+  sgNameMap?: Map<string, string>
+): Promise<void> {
+  // Re-describe to get the current rule set (we may have just added rules
+  // a few ms ago).
+  const desc = await ec2.send(new DescribeSecurityGroupsCommand({
+    GroupIds: [groupId],
+  }));
+  const sg = desc.SecurityGroups?.[0];
+  if (!sg) return;
+
+  // Build a set of "rule signatures" from config so we can check live
+  // rules against it. Each AWS IpPermission can contain multiple
+  // IpRanges + UserIdGroupPairs, so we expand them out one signature
+  // per (perm × range) when comparing.
+  const sigOf = (
+    protocol: string,
+    fromPort: number | undefined,
+    toPort: number | undefined,
+    src: string
+  ): string => `${protocol}|${fromPort ?? ''}|${toPort ?? ''}|${src}`;
+
+  const desiredSigs = new Set<string>();
+  for (const rule of config.ingress ?? []) {
+    const sourceSgId = rule.sourceSg ? sgNameMap?.get(rule.sourceSg) : undefined;
+    const src = rule.cidrIp ?? sourceSgId ?? '';
+    if (!src) continue;
+    desiredSigs.add(sigOf(
+      rule.protocol,
+      rule.protocol === '-1' ? undefined : (rule.fromPort ?? 0),
+      rule.protocol === '-1' ? undefined : (rule.toPort ?? rule.fromPort ?? 0),
+      src,
+    ));
+  }
+  const desiredEgressSigs = new Set<string>();
+  for (const rule of config.egress ?? []) {
+    const sourceSgId = rule.sourceSg ? sgNameMap?.get(rule.sourceSg) : undefined;
+    const src = rule.cidrIp ?? sourceSgId ?? '';
+    if (!src) continue;
+    desiredEgressSigs.add(sigOf(
+      rule.protocol,
+      rule.protocol === '-1' ? undefined : (rule.fromPort ?? 0),
+      rule.protocol === '-1' ? undefined : (rule.toPort ?? rule.fromPort ?? 0),
+      src,
+    ));
+  }
+
+  // Walk live ingress; revoke anything not in desiredSigs.
+  for (const perm of sg.IpPermissions ?? []) {
+    const protocol = perm.IpProtocol ?? '-1';
+    const fromPort = perm.FromPort;
+    const toPort = perm.ToPort;
+    for (const range of perm.IpRanges ?? []) {
+      const sig = sigOf(protocol, fromPort, toPort, range.CidrIp ?? '');
+      if (!desiredSigs.has(sig)) {
+        console.log(`[security-group] ${config.name}: revoking ingress ${protocol}:${fromPort ?? '*'}-${toPort ?? '*'} from ${range.CidrIp}`);
+        await ec2.send(new RevokeSecurityGroupIngressCommand({
+          GroupId: groupId,
+          IpPermissions: [{
+            IpProtocol: protocol,
+            ...(fromPort !== undefined ? { FromPort: fromPort } : {}),
+            ...(toPort !== undefined ? { ToPort: toPort } : {}),
+            IpRanges: [{ CidrIp: range.CidrIp }],
+          }],
+        })).catch((err: any) => {
+          if (err.name !== 'InvalidPermission.NotFound') throw err;
+        });
+      }
+    }
+    for (const pair of perm.UserIdGroupPairs ?? []) {
+      const sig = sigOf(protocol, fromPort, toPort, pair.GroupId ?? '');
+      if (!desiredSigs.has(sig)) {
+        console.log(`[security-group] ${config.name}: revoking ingress ${protocol}:${fromPort ?? '*'}-${toPort ?? '*'} from ${pair.GroupId}`);
+        await ec2.send(new RevokeSecurityGroupIngressCommand({
+          GroupId: groupId,
+          IpPermissions: [{
+            IpProtocol: protocol,
+            ...(fromPort !== undefined ? { FromPort: fromPort } : {}),
+            ...(toPort !== undefined ? { ToPort: toPort } : {}),
+            UserIdGroupPairs: [{ GroupId: pair.GroupId }],
+          }],
+        })).catch((err: any) => {
+          if (err.name !== 'InvalidPermission.NotFound') throw err;
+        });
+      }
+    }
+  }
+
+  // Walk live egress; revoke anything not in desiredEgressSigs. Skip if
+  // config has no egress declared (leaves AWS's default allow-all alone).
+  if ((config.egress?.length ?? 0) > 0) {
+    for (const perm of sg.IpPermissionsEgress ?? []) {
+      const protocol = perm.IpProtocol ?? '-1';
+      const fromPort = perm.FromPort;
+      const toPort = perm.ToPort;
+      for (const range of perm.IpRanges ?? []) {
+        const sig = sigOf(protocol, fromPort, toPort, range.CidrIp ?? '');
+        if (!desiredEgressSigs.has(sig)) {
+          console.log(`[security-group] ${config.name}: revoking egress ${protocol}:${fromPort ?? '*'}-${toPort ?? '*'} to ${range.CidrIp}`);
+          await ec2.send(new RevokeSecurityGroupEgressCommand({
+            GroupId: groupId,
+            IpPermissions: [{
+              IpProtocol: protocol,
+              ...(fromPort !== undefined ? { FromPort: fromPort } : {}),
+              ...(toPort !== undefined ? { ToPort: toPort } : {}),
+              IpRanges: [{ CidrIp: range.CidrIp }],
+            }],
+          })).catch((err: any) => {
+            if (err.name !== 'InvalidPermission.NotFound') throw err;
+          });
+        }
+      }
+      for (const pair of perm.UserIdGroupPairs ?? []) {
+        const sig = sigOf(protocol, fromPort, toPort, pair.GroupId ?? '');
+        if (!desiredEgressSigs.has(sig)) {
+          console.log(`[security-group] ${config.name}: revoking egress ${protocol}:${fromPort ?? '*'}-${toPort ?? '*'} to ${pair.GroupId}`);
+          await ec2.send(new RevokeSecurityGroupEgressCommand({
+            GroupId: groupId,
+            IpPermissions: [{
+              IpProtocol: protocol,
+              ...(fromPort !== undefined ? { FromPort: fromPort } : {}),
+              ...(toPort !== undefined ? { ToPort: toPort } : {}),
+              UserIdGroupPairs: [{ GroupId: pair.GroupId }],
+            }],
+          })).catch((err: any) => {
+            if (err.name !== 'InvalidPermission.NotFound') throw err;
+          });
+        }
+      }
+    }
+  }
+}

@@ -20,6 +20,7 @@ import { fromIni } from '@aws-sdk/credential-providers';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
+import { lambdaName } from './aws.js';
 
 // See import.ts for rationale — generated configs use absolute path to this Forge.
 const FORGE_CONFIG_PATH = resolve(dirname(fileURLToPath(import.meta.url)), 'config.js');
@@ -176,22 +177,22 @@ async function discoverCognito(ctx: DiscoverContext): Promise<any[]> {
         console.log(`    Found Cognito client: ${cc.ClientName} (${cc.ClientId})`);
       }
 
-      // Triggers
+      // Triggers. lambdaName() handles versioned/aliased ARNs correctly.
       const triggers: any = {};
       if (p.LambdaConfig?.PreTokenGeneration) {
-        triggers.preTokenGeneration = p.LambdaConfig.PreTokenGeneration.split(':').pop();
+        triggers.preTokenGeneration = lambdaName(p.LambdaConfig.PreTokenGeneration);
       }
       if (p.LambdaConfig?.PostConfirmation) {
-        triggers.postConfirmation = p.LambdaConfig.PostConfirmation.split(':').pop();
+        triggers.postConfirmation = lambdaName(p.LambdaConfig.PostConfirmation);
       }
       if (p.LambdaConfig?.PreSignUp) {
-        triggers.preSignUp = p.LambdaConfig.PreSignUp.split(':').pop();
+        triggers.preSignUp = lambdaName(p.LambdaConfig.PreSignUp);
       }
       if (p.LambdaConfig?.CustomMessage) {
-        triggers.customMessage = p.LambdaConfig.CustomMessage.split(':').pop();
+        triggers.customMessage = lambdaName(p.LambdaConfig.CustomMessage);
       }
       if (p.LambdaConfig?.CustomEmailSender?.LambdaArn) {
-        triggers.customEmailSender = p.LambdaConfig.CustomEmailSender.LambdaArn.split(':').pop();
+        triggers.customEmailSender = lambdaName(p.LambdaConfig.CustomEmailSender.LambdaArn);
       }
       if (p.LambdaConfig?.KMSKeyID) {
         triggers.customSenderKmsKey = p.LambdaConfig.KMSKeyID;
@@ -524,7 +525,7 @@ async function discoverEventBridge(ctx: DiscoverContext): Promise<any[]> {
         name: rule.Name,
         schedule: rule.ScheduleExpression,
         eventPattern: rule.EventPattern ? JSON.parse(rule.EventPattern) : undefined,
-        targetLambda: target?.Arn?.split(':').pop() ?? '',
+        targetLambda: lambdaName(target?.Arn),
         enabled: rule.State === 'ENABLED',
         input: target?.Input,
       });

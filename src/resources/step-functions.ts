@@ -21,7 +21,7 @@ import {
 } from '@aws-sdk/client-iam';
 import type { AwsContext } from '../aws.js';
 import type { StepFunctionConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, canonicalize } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface StepFunctionState {
@@ -76,31 +76,54 @@ export async function planStepFunction(
   appName: string,
   plan: Plan
 ): Promise<StepFunctionState | null> {
+  const sfn = getClient(ctx, SFNClient);
   const current = await describeStepFunction(ctx, config, appName);
 
-  if (current) {
+  if (!current) {
     addChange(plan, {
       resourceType: 'step-functions',
       resourceId: config.name,
-      changeType: 'unchanged',
+      changeType: 'create',
       tier: 'compute',
-      fields: [],
+      fields: [
+        { field: 'type', current: undefined, desired: config.type ?? 'STANDARD' },
+        { field: 'timeout', current: undefined, desired: `${config.timeout ?? 5}m` },
+      ],
     });
-    return current;
+    return null;
+  }
+
+  // Existing state machine: check definition drift.
+  const fields: { field: string; current: any; desired: any }[] = [];
+  if (config.definition) {
+    try {
+      const desc = await sfn.send(new DescribeStateMachineCommand({
+        stateMachineArn: current.stateMachineArn,
+      }));
+      const currentDef = desc.definition ? JSON.parse(desc.definition) : {};
+      if (canonicalize(currentDef) !== canonicalize(config.definition)) {
+        fields.push({
+          field: 'definition',
+          current: '(differs)',
+          desired: '(config)',
+        });
+      }
+    } catch {
+      /* describe failed; report as unchanged so apply can re-check */
+    }
+  }
+  if (config.type && current.type !== config.type) {
+    fields.push({ field: 'type', current: current.type, desired: config.type });
   }
 
   addChange(plan, {
     resourceType: 'step-functions',
     resourceId: config.name,
-    changeType: 'create',
+    changeType: fields.length > 0 ? 'update' : 'unchanged',
     tier: 'compute',
-    fields: [
-      { field: 'type', current: undefined, desired: config.type ?? 'STANDARD' },
-      { field: 'timeout', current: undefined, desired: `${config.timeout ?? 5}m` },
-    ],
+    fields,
   });
-
-  return null;
+  return current;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +201,9 @@ export async function applyStepFunction(
           stateMachineArn: existing.stateMachineArn,
         }));
         const currentDef = desc.definition ? JSON.parse(desc.definition) : {};
-        if (JSON.stringify(currentDef) !== JSON.stringify(config.definition)) {
+        // Use canonicalize so whitespace and key-order differences don't
+        // trigger spurious updates.
+        if (canonicalize(currentDef) !== canonicalize(config.definition)) {
           console.log(`[step-functions] ${config.name}: updating definition`);
           await sfn.send(new UpdateStateMachineCommand({
             stateMachineArn: existing.stateMachineArn,

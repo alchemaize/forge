@@ -98,6 +98,8 @@ export async function planElastiCache(
   const current = await describeElastiCache(ctx, config, appName);
 
   if (current) {
+    // Adoption-only today: forge reads but doesn't reconcile attributes
+    // beyond existence. Report unchanged truthfully — apply does the same.
     addChange(plan, {
       resourceType: 'elasticache',
       resourceId: config.name,
@@ -108,16 +110,18 @@ export async function planElastiCache(
     return current;
   }
 
+  // Not found, and create is not implemented. Be honest in plan: this
+  // would error on apply, so flag it loudly. Avoids the earlier
+  // plan-lies-apply-noops pattern.
   addChange(plan, {
     resourceType: 'elasticache',
     resourceId: config.name,
     changeType: 'create',
     tier: 'data',
     fields: [
+      { field: '!! CREATE NOT IMPLEMENTED', current: undefined, desired: 'manual provision required' },
       { field: 'engine', current: undefined, desired: config.engine ?? 'redis' },
       { field: 'nodeType', current: undefined, desired: config.nodeType ?? 'cache.t3.micro' },
-      { field: 'transitEncryption', current: undefined, desired: config.transitEncryption ?? true },
-      { field: 'atRestEncryption', current: undefined, desired: config.atRestEncryption ?? true },
     ],
   });
 
@@ -125,7 +129,13 @@ export async function planElastiCache(
 }
 
 // ---------------------------------------------------------------------------
-// Apply — placeholder (read-only adoption for now)
+// Apply
+//
+// Adoption-only today. Create is intentionally not implemented because no
+// project in the dev workspace creates ElastiCache via Forge (existing
+// clusters were all provisioned by CDK or console and are adopted as-is).
+// If you need to create one, do it via Console or AWS CLI, then re-run
+// `forge import` so the config matches.
 // ---------------------------------------------------------------------------
 
 export async function applyElastiCache(
@@ -139,9 +149,11 @@ export async function applyElastiCache(
     return existing;
   }
 
-  // TODO: Create replication group
-  console.log(`[elasticache] ${config.name} — not found. Create via AWS Console or extend this module.`);
-  return null;
+  throw new Error(
+    `[elasticache] ${config.name}: replication group not found and create is not implemented.\n` +
+    `Provision the cluster via AWS Console or CLI, then re-run 'forge import' to capture it.\n` +
+    `(Adoption-only today; native create can be added if a real project needs it.)`
+  );
 }
 
 /**

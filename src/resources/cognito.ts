@@ -23,7 +23,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { AwsContext } from '../aws.js';
 import type { CognitoConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, lambdaName, toLambdaArn } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface CognitoState {
@@ -32,28 +32,7 @@ export interface CognitoState {
   clients: Array<{ clientId: string; clientName: string }>;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Extract the Lambda function name from either a full ARN or a bare name.
- * Used for safe equality checks between AWS's stored value (full ARN) and
- * a user's config value (often just the function name).
- */
-function lambdaName(arnOrName: string | undefined): string {
-  if (!arnOrName) return '';
-  return arnOrName.split(':').pop() ?? arnOrName;
-}
-
-/**
- * Convert a function name to a full Lambda ARN.
- * Cognito's UpdateUserPool LambdaConfig fields require ARNs, not bare names.
- */
-function toLambdaArn(nameOrArn: string, region: string, accountId: string): string {
-  if (nameOrArn.startsWith('arn:')) return nameOrArn;
-  return `arn:aws:lambda:${region}:${accountId}:function:${nameOrArn}`;
-}
+// ARN helpers (lambdaName, toLambdaArn) live in ../aws.ts as shared utilities.
 
 // ---------------------------------------------------------------------------
 // Describe
@@ -378,133 +357,168 @@ export async function applyCognito(
     }
   }
 
-  // Set triggers if configured
-  if (config.triggers) {
-    console.log('[cognito] Reading current pool config for trigger update...');
-    const poolDesc = await client.send(new DescribeUserPoolCommand({
-      UserPoolId: existing.userPoolId,
-    }));
-    const pool = poolDesc.UserPool!;
+  // Triggers are intentionally NOT applied here. The trigger Lambdas are
+  // created in Phase 5 (compute), so on a greenfield apply they don't exist
+  // yet when this function runs. The engine calls applyCognitoTriggers()
+  // after Phase 5 to attach triggers and grant the invoke permission.
+  // applyCognito() (the back-compat wrapper below) calls both in sequence.
 
-    const currentTriggers = pool.LambdaConfig ?? {};
-    // Spread preserves every existing trigger (including CustomEmailSender, KMSKeyID,
-    // CustomSMSSender, etc.) so apply never wipes triggers that aren't explicitly
-    // managed by config.
-    const desiredTriggers = { ...currentTriggers };
-    let triggersChanged = false;
+  return existing;
+}
 
-    // Compare by Lambda function name to avoid false positives from ARN-vs-name diffs.
-    // Send full ARNs in updates because Cognito's LambdaConfig fields require ARNs.
-    if (config.triggers.preTokenGeneration &&
-        lambdaName(currentTriggers.PreTokenGeneration) !== lambdaName(config.triggers.preTokenGeneration)) {
-      desiredTriggers.PreTokenGeneration = toLambdaArn(config.triggers.preTokenGeneration, ctx.region, ctx.accountId);
+/**
+ * Attach Lambda triggers to a Cognito user pool, and grant Cognito the
+ * `lambda:InvokeFunction` permission on each trigger Lambda.
+ *
+ * Must run AFTER the trigger Lambdas exist in AWS. On greenfield applies,
+ * the engine calls this in a deferred pass (post-Phase-5) so a fresh stack
+ * can stand up Cognito + Lambdas + triggers in one apply without circular
+ * dependency errors.
+ */
+export async function applyCognitoTriggers(
+  ctx: AwsContext,
+  config: CognitoConfig,
+  existing: CognitoState
+): Promise<void> {
+  if (!config.triggers) return;
+
+  const client = getClient(ctx, CognitoIdentityProviderClient);
+
+  console.log('[cognito] Reading current pool config for trigger update...');
+  const poolDesc = await client.send(new DescribeUserPoolCommand({
+    UserPoolId: existing.userPoolId,
+  }));
+  const pool = poolDesc.UserPool!;
+
+  const currentTriggers = pool.LambdaConfig ?? {};
+  // Spread preserves every existing trigger (including CustomEmailSender, KMSKeyID,
+  // CustomSMSSender, etc.) so apply never wipes triggers that aren't explicitly
+  // managed by config.
+  const desiredTriggers = { ...currentTriggers };
+  let triggersChanged = false;
+
+  // Compare by Lambda function name to avoid false positives from ARN-vs-name diffs.
+  // Send full ARNs in updates because Cognito's LambdaConfig fields require ARNs.
+  if (config.triggers.preTokenGeneration &&
+      lambdaName(currentTriggers.PreTokenGeneration) !== lambdaName(config.triggers.preTokenGeneration)) {
+    desiredTriggers.PreTokenGeneration = toLambdaArn(config.triggers.preTokenGeneration, ctx.region, ctx.accountId);
+    triggersChanged = true;
+  }
+  if (config.triggers.postConfirmation &&
+      lambdaName(currentTriggers.PostConfirmation) !== lambdaName(config.triggers.postConfirmation)) {
+    desiredTriggers.PostConfirmation = toLambdaArn(config.triggers.postConfirmation, ctx.region, ctx.accountId);
+    triggersChanged = true;
+  }
+  if (config.triggers.preSignUp &&
+      lambdaName(currentTriggers.PreSignUp) !== lambdaName(config.triggers.preSignUp)) {
+    desiredTriggers.PreSignUp = toLambdaArn(config.triggers.preSignUp, ctx.region, ctx.accountId);
+    triggersChanged = true;
+  }
+  if (config.triggers.customMessage &&
+      lambdaName(currentTriggers.CustomMessage) !== lambdaName(config.triggers.customMessage)) {
+    desiredTriggers.CustomMessage = toLambdaArn(config.triggers.customMessage, ctx.region, ctx.accountId);
+    triggersChanged = true;
+  }
+  if (config.triggers.customEmailSender) {
+    // CustomEmailSender has a nested structure (LambdaArn + LambdaVersion).
+    // Default to V1_0 — V2_0 changed the event payload format and isn't backwards-compatible.
+    const desiredArn = toLambdaArn(config.triggers.customEmailSender, ctx.region, ctx.accountId);
+    const currentArn = currentTriggers.CustomEmailSender?.LambdaArn;
+    if (lambdaName(currentArn) !== lambdaName(desiredArn)) {
+      desiredTriggers.CustomEmailSender = { LambdaArn: desiredArn, LambdaVersion: 'V1_0' };
       triggersChanged = true;
     }
-    if (config.triggers.postConfirmation &&
-        lambdaName(currentTriggers.PostConfirmation) !== lambdaName(config.triggers.postConfirmation)) {
-      desiredTriggers.PostConfirmation = toLambdaArn(config.triggers.postConfirmation, ctx.region, ctx.accountId);
-      triggersChanged = true;
-    }
-    if (config.triggers.preSignUp &&
-        lambdaName(currentTriggers.PreSignUp) !== lambdaName(config.triggers.preSignUp)) {
-      desiredTriggers.PreSignUp = toLambdaArn(config.triggers.preSignUp, ctx.region, ctx.accountId);
-      triggersChanged = true;
-    }
-    if (config.triggers.customMessage &&
-        lambdaName(currentTriggers.CustomMessage) !== lambdaName(config.triggers.customMessage)) {
-      desiredTriggers.CustomMessage = toLambdaArn(config.triggers.customMessage, ctx.region, ctx.accountId);
-      triggersChanged = true;
-    }
-    if (config.triggers.customEmailSender) {
-      // CustomEmailSender has a nested structure (LambdaArn + LambdaVersion).
-      // Default to V1_0 — V2_0 changed the event payload format and isn't backwards-compatible.
-      const desiredArn = toLambdaArn(config.triggers.customEmailSender, ctx.region, ctx.accountId);
-      const currentArn = currentTriggers.CustomEmailSender?.LambdaArn;
-      if (lambdaName(currentArn) !== lambdaName(desiredArn)) {
-        desiredTriggers.CustomEmailSender = { LambdaArn: desiredArn, LambdaVersion: 'V1_0' };
-        triggersChanged = true;
+  }
+  if (config.triggers.customSenderKmsKey &&
+      currentTriggers.KMSKeyID !== config.triggers.customSenderKmsKey) {
+    // KMS key Cognito uses to encrypt verification codes for the CustomEmailSender Lambda.
+    // Stored at LambdaConfig.KMSKeyID (sibling to CustomEmailSender, not nested).
+    desiredTriggers.KMSKeyID = config.triggers.customSenderKmsKey;
+    triggersChanged = true;
+  }
+
+  // Always ensure the invoke permissions are in place. Even if the trigger
+  // ARN is unchanged, the Lambda might be brand new (and so missing the
+  // permission). Doing this unconditionally is safe because the permission
+  // check below dedupes via GetPolicy.
+  const { LambdaClient, AddPermissionCommand, GetPolicyCommand } = await import('@aws-sdk/client-lambda');
+  const lambdaClient = new LambdaClient({ region: ctx.region, credentials: ctx.credentials });
+  const triggerFunctions = [
+    config.triggers.preTokenGeneration,
+    config.triggers.postConfirmation,
+    config.triggers.preSignUp,
+    config.triggers.customMessage,
+    config.triggers.customEmailSender,
+  ].filter(Boolean) as string[];
+
+  for (const fnName of triggerFunctions) {
+    const statementId = `cognito-trigger-${fnName}`.replace(/[^a-zA-Z0-9_-]/g, '-');
+    try {
+      const policy = await lambdaClient.send(new GetPolicyCommand({ FunctionName: fnName }));
+      const policyDoc = JSON.parse(policy.Policy!);
+      const hasPermission = policyDoc.Statement?.some(
+        (s: any) => s.Principal?.Service === 'cognito-idp.amazonaws.com' &&
+                    s.Condition?.ArnLike?.['AWS:SourceArn'] === existing.userPoolArn
+      );
+      if (hasPermission) continue;
+    } catch (err: any) {
+      // ResourceNotFoundException: the Lambda doesn't exist. Don't fail the
+      // entire apply, but make it visible — the user's config references a
+      // trigger Lambda that wasn't part of this apply. Cognito will accept
+      // the LambdaConfig but invocations will fail at runtime.
+      if (err.name === 'ResourceNotFoundException') {
+        console.log(`[cognito] Warning: trigger Lambda not found: ${fnName}. Skipping permission grant.`);
+        continue;
       }
-    }
-    if (config.triggers.customSenderKmsKey &&
-        currentTriggers.KMSKeyID !== config.triggers.customSenderKmsKey) {
-      // KMS key Cognito uses to encrypt verification codes for the CustomEmailSender Lambda.
-      // Stored at LambdaConfig.KMSKeyID (sibling to CustomEmailSender, not nested).
-      desiredTriggers.KMSKeyID = config.triggers.customSenderKmsKey;
-      triggersChanged = true;
+      // Otherwise: no policy yet, fall through to add permission.
     }
 
-    if (triggersChanged) {
-      console.log('[cognito] Updating triggers (preserving all other pool config)');
-      // CRITICAL: Read EVERY field and include it in the update
-      await client.send(new UpdateUserPoolCommand({
-        UserPoolId: existing.userPoolId,
-        // Preserve ALL existing config
-        Policies: pool.Policies,
-        AutoVerifiedAttributes: pool.AutoVerifiedAttributes,
-        SmsVerificationMessage: pool.SmsVerificationMessage,
-        EmailVerificationMessage: pool.EmailVerificationMessage,
-        EmailVerificationSubject: pool.EmailVerificationSubject,
-        VerificationMessageTemplate: pool.VerificationMessageTemplate,
-        SmsAuthenticationMessage: pool.SmsAuthenticationMessage,
-        MfaConfiguration: pool.MfaConfiguration,
-        DeviceConfiguration: pool.DeviceConfiguration,
-        EmailConfiguration: pool.EmailConfiguration,
-        SmsConfiguration: pool.SmsConfiguration,
-        UserPoolTags: pool.UserPoolTags,
-        AdminCreateUserConfig: pool.AdminCreateUserConfig,
-        UserPoolAddOns: pool.UserPoolAddOns,
-        AccountRecoverySetting: pool.AccountRecoverySetting,
-        // Apply trigger changes
-        LambdaConfig: desiredTriggers,
+    try {
+      await lambdaClient.send(new AddPermissionCommand({
+        FunctionName: fnName,
+        StatementId: statementId,
+        Action: 'lambda:InvokeFunction',
+        Principal: 'cognito-idp.amazonaws.com',
+        SourceArn: existing.userPoolArn,
       }));
-      console.log('[cognito] Triggers updated');
-
-      // Add Lambda invoke permissions for each trigger
-      const { LambdaClient, AddPermissionCommand, GetPolicyCommand } = await import('@aws-sdk/client-lambda');
-      const lambdaClient = new LambdaClient({ region: ctx.region, credentials: ctx.credentials });
-      const poolArn = existing.userPoolArn;
-
-      const triggerFunctions = [
-        config.triggers.preTokenGeneration,
-        config.triggers.postConfirmation,
-        config.triggers.preSignUp,
-        config.triggers.customMessage,
-        config.triggers.customEmailSender,
-      ].filter(Boolean) as string[];
-
-      for (const fnName of triggerFunctions) {
-        const statementId = `cognito-trigger-${fnName}`.replace(/[^a-zA-Z0-9_-]/g, '-');
-        try {
-          // Check if permission already exists
-          const policy = await lambdaClient.send(new GetPolicyCommand({ FunctionName: fnName }));
-          const policyDoc = JSON.parse(policy.Policy!);
-          const hasPermission = policyDoc.Statement?.some(
-            (s: any) => s.Principal?.Service === 'cognito-idp.amazonaws.com'
-          );
-          if (hasPermission) continue;
-        } catch {
-          // No policy exists — need to add permission
-        }
-
-        try {
-          await lambdaClient.send(new AddPermissionCommand({
-            FunctionName: fnName,
-            StatementId: statementId,
-            Action: 'lambda:InvokeFunction',
-            Principal: 'cognito-idp.amazonaws.com',
-            SourceArn: poolArn,
-          }));
-          console.log(`[cognito] Added invoke permission for trigger: ${fnName}`);
-        } catch (err: any) {
-          if (err.name !== 'ResourceConflictException') {
-            console.log(`[cognito] Warning: could not add permission for ${fnName}: ${err.message}`);
-          }
-        }
+      console.log(`[cognito] Added invoke permission for trigger: ${fnName}`);
+    } catch (err: any) {
+      if (err.name === 'ResourceNotFoundException') {
+        console.log(`[cognito] Warning: trigger Lambda not found: ${fnName}.`);
+      } else if (err.name !== 'ResourceConflictException') {
+        console.log(`[cognito] Warning: could not add permission for ${fnName}: ${err.message}`);
       }
     }
   }
 
-  return existing;
+  if (triggersChanged) {
+    console.log('[cognito] Updating triggers (preserving all other pool config)');
+    // CRITICAL: Read EVERY field and include it in the update
+    await client.send(new UpdateUserPoolCommand({
+      UserPoolId: existing.userPoolId,
+      // Preserve ALL existing config
+      Policies: pool.Policies,
+      AutoVerifiedAttributes: pool.AutoVerifiedAttributes,
+      SmsVerificationMessage: pool.SmsVerificationMessage,
+      EmailVerificationMessage: pool.EmailVerificationMessage,
+      EmailVerificationSubject: pool.EmailVerificationSubject,
+      VerificationMessageTemplate: pool.VerificationMessageTemplate,
+      SmsAuthenticationMessage: pool.SmsAuthenticationMessage,
+      MfaConfiguration: pool.MfaConfiguration,
+      DeviceConfiguration: pool.DeviceConfiguration,
+      EmailConfiguration: pool.EmailConfiguration,
+      SmsConfiguration: pool.SmsConfiguration,
+      UserPoolTags: pool.UserPoolTags,
+      AdminCreateUserConfig: pool.AdminCreateUserConfig,
+      UserPoolAddOns: pool.UserPoolAddOns,
+      AccountRecoverySetting: pool.AccountRecoverySetting,
+      // Apply trigger changes
+      LambdaConfig: desiredTriggers,
+    }));
+    console.log('[cognito] Triggers updated');
+  } else {
+    console.log('[cognito] Triggers already match config');
+  }
 }
 
 export async function destroyCognito(): Promise<never> {

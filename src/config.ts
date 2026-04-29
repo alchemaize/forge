@@ -66,6 +66,8 @@ export interface RdsConfig {
   forceSsl?: boolean;
   /** Deletion protection (default: false for pre-prod) */
   deletionProtection?: boolean;
+  /** Days of automated backup retention (default: 1 day for instance, 7 for Aurora). */
+  backupRetention?: number;
   /** Store password in Secrets Manager (default: true) or SSM */
   passwordStore?: 'secrets-manager' | 'ssm';
   /** Enable pgvector extension */
@@ -622,6 +624,19 @@ export interface SecurityGroupConfig {
   /** Outbound rules. AWS adds a default allow-all egress on create; Forge replaces
    * with the config rules if specified, leaves the default if not. */
   egress?: SecurityGroupRule[];
+  /**
+   * Revoke any rule that's in AWS but not in config (full sync).
+   *
+   * Default: false. With pruneRules off, Forge only ADDs rules; rules removed
+   * from config persist in AWS until manually revoked. This is the safer
+   * default for adoption (Forge won't accidentally remove rules it didn't
+   * originally know about).
+   *
+   * Turn on for security-critical groups where the config should be the
+   * authoritative source of truth (e.g., a public-facing ALB SG where
+   * leaving extra ingress rules would be a real security hole).
+   */
+  pruneRules?: boolean;
 }
 
 // ---------------------------------------------------------------------------

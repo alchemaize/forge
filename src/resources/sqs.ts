@@ -58,44 +58,7 @@ export async function describeSqs(
 }
 
 // ---------------------------------------------------------------------------
-// Plan
-// ---------------------------------------------------------------------------
-
-export async function planSqs(
-  ctx: AwsContext,
-  config: SqsQueueConfig,
-  appName: string,
-  plan: Plan
-): Promise<SqsState | null> {
-  const current = await describeSqs(ctx, config, appName);
-
-  if (current) {
-    addChange(plan, {
-      resourceType: 'sqs',
-      resourceId: config.name,
-      changeType: 'unchanged',
-      tier: 'compute',
-      fields: [],
-    });
-    return current;
-  }
-
-  addChange(plan, {
-    resourceType: 'sqs',
-    resourceId: config.name,
-    changeType: 'create',
-    tier: 'compute',
-    fields: [
-      { field: 'retentionDays', current: undefined, desired: config.retentionDays ?? 4 },
-      { field: 'fifo', current: undefined, desired: config.fifo ?? false },
-    ],
-  });
-
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Apply
+// Drift detection
 // ---------------------------------------------------------------------------
 
 /**
@@ -123,6 +86,88 @@ function buildAttributes(config: SqsQueueConfig, accountId: string, region: stri
   return attrs;
 }
 
+/**
+ * Read the queue's live attributes and return the subset that differs from
+ * config. Returns an empty object if the queue is in sync.
+ */
+async function computeSqsDrift(
+  sqs: SQSClient,
+  queueUrl: string,
+  desiredAttrs: Record<string, string>
+): Promise<Record<string, string>> {
+  if (Object.keys(desiredAttrs).length === 0) return {};
+  const currentAttrs = await sqs.send(new GetQueueAttributesCommand({
+    QueueUrl: queueUrl,
+    AttributeNames: Object.keys(desiredAttrs) as any,
+  }));
+  const current = (currentAttrs.Attributes ?? {}) as Record<string, string>;
+  const drift: Record<string, string> = {};
+  for (const [k, v] of Object.entries(desiredAttrs)) {
+    if (current[k] !== v) drift[k] = v;
+  }
+  return drift;
+}
+
+// ---------------------------------------------------------------------------
+// Plan
+// ---------------------------------------------------------------------------
+
+export async function planSqs(
+  ctx: AwsContext,
+  config: SqsQueueConfig,
+  appName: string,
+  plan: Plan
+): Promise<SqsState | null> {
+  const sqs = getClient(ctx, SQSClient);
+  const current = await describeSqs(ctx, config, appName);
+
+  if (!current) {
+    addChange(plan, {
+      resourceType: 'sqs',
+      resourceId: config.name,
+      changeType: 'create',
+      tier: 'compute',
+      fields: [
+        { field: 'retentionDays', current: undefined, desired: config.retentionDays ?? 4 },
+        { field: 'fifo', current: undefined, desired: config.fifo ?? false },
+        ...(config.dlqName ? [{ field: 'redrivePolicy', current: undefined, desired: `dlq=${config.dlqName}, maxReceive=${config.maxReceiveCount ?? 3}` }] : []),
+      ],
+    });
+    return null;
+  }
+
+  // Existing queue: compute attribute drift.
+  const desiredAttrs = buildAttributes(config, ctx.accountId, ctx.region);
+  const drift = await computeSqsDrift(sqs, current.queueUrl, desiredAttrs);
+  if (Object.keys(drift).length === 0) {
+    addChange(plan, {
+      resourceType: 'sqs',
+      resourceId: config.name,
+      changeType: 'unchanged',
+      tier: 'compute',
+      fields: [],
+    });
+  } else {
+    const fields = Object.entries(drift).map(([k, v]) => ({
+      field: k,
+      current: '(differs)',
+      desired: v,
+    }));
+    addChange(plan, {
+      resourceType: 'sqs',
+      resourceId: config.name,
+      changeType: 'update',
+      tier: 'compute',
+      fields,
+    });
+  }
+  return current;
+}
+
+// ---------------------------------------------------------------------------
+// Apply
+// ---------------------------------------------------------------------------
+
 export async function applySqs(
   ctx: AwsContext,
   config: SqsQueueConfig,
@@ -132,30 +177,20 @@ export async function applySqs(
   const existing = await describeSqs(ctx, config, _appName);
 
   if (existing) {
-    // Update attributes only if they're in config and have changed.
-    // SetQueueAttributes is partial (only specified attributes change), so it's safe.
+    // Apply only drifted attributes. SetQueueAttributes is partial so this
+    // is safe even when AWS has fields we don't manage.
     const desiredAttrs = buildAttributes(config, ctx.accountId, ctx.region);
-    if (Object.keys(desiredAttrs).length > 0) {
-      try {
-        const currentAttrs = await sqs.send(new GetQueueAttributesCommand({
+    try {
+      const drift = await computeSqsDrift(sqs, existing.queueUrl, desiredAttrs);
+      if (Object.keys(drift).length > 0) {
+        console.log(`[sqs] ${config.name}: updating ${Object.keys(drift).join(', ')}`);
+        await sqs.send(new SetQueueAttributesCommand({
           QueueUrl: existing.queueUrl,
-          AttributeNames: Object.keys(desiredAttrs) as any,
+          Attributes: drift,
         }));
-        const current = (currentAttrs.Attributes ?? {}) as Record<string, string>;
-        const drift: Record<string, string> = {};
-        for (const [k, v] of Object.entries(desiredAttrs)) {
-          if (current[k] !== v) drift[k] = v;
-        }
-        if (Object.keys(drift).length > 0) {
-          console.log(`[sqs] ${config.name}: updating ${Object.keys(drift).join(', ')}`);
-          await sqs.send(new SetQueueAttributesCommand({
-            QueueUrl: existing.queueUrl,
-            Attributes: drift,
-          }));
-        }
-      } catch (err: any) {
-        console.log(`[sqs] Warning: could not check/update attributes for ${config.name}: ${err.message}`);
       }
+    } catch (err: any) {
+      console.log(`[sqs] Warning: could not check/update attributes for ${config.name}: ${err.message}`);
     }
     return existing;
   }

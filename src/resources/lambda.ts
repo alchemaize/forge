@@ -37,7 +37,7 @@ import { resolve } from 'path';
 import type { AwsContext } from '../aws.js';
 import type { LambdaFunctionConfig } from '../config.js';
 import type { VpcState } from './vpc.js';
-import { getClient } from '../aws.js';
+import { getClient, canonicalize } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface LambdaState {
@@ -52,6 +52,10 @@ export interface LambdaState {
   /** Current environment variables. Used by applyLambda to merge with config.env
    * so env vars not in config are preserved (avoids wiping secrets on update). */
   env: Record<string, string>;
+  /** VPC subnets the Lambda is currently attached to. Empty array = not in VPC. */
+  vpcSubnetIds: string[];
+  /** VPC security groups the Lambda is currently attached to. */
+  vpcSecurityGroupIds: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +81,8 @@ export async function describeLambda(
       codeSize: cfg.CodeSize ?? 0,
       lastModified: cfg.LastModified ?? '',
       env: cfg.Environment?.Variables ?? {},
+      vpcSubnetIds: cfg.VpcConfig?.SubnetIds ?? [],
+      vpcSecurityGroupIds: cfg.VpcConfig?.SecurityGroupIds ?? [],
     };
   } catch (err: any) {
     if (err.name === 'ResourceNotFoundException') return null;
@@ -425,16 +431,6 @@ async function syncRolePolicies(
   }
 }
 
-/** JSON canonicalization for stable comparison: sorts object keys recursively. */
-function canonicalize(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalize).join(',')}]`;
-  if (v && typeof v === 'object') {
-    const keys = Object.keys(v as Record<string, unknown>).sort();
-    return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalize((v as any)[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v);
-}
-
 async function ensureExecutionRole(
   ctx: AwsContext,
   appName: string,
@@ -579,7 +575,15 @@ export async function applyLambda(
     }
   }
 
-  // VPC config
+  // VPC config. Three states matter:
+  //   1. Config wants VPC + we have vpcState  -> attach (or update) VpcConfig
+  //   2. Config does NOT want VPC + Lambda is currently in a VPC -> detach
+  //      by sending empty arrays. AWS Lambda's API treats empty arrays as
+  //      "remove me from the VPC."
+  //   3. Config does not want VPC and Lambda isn't in one -> omit field
+  //      entirely so the API doesn't think we're trying to change anything.
+  // Earlier the omit-when-undefined path silently kept Lambdas in the VPC
+  // forever; user couldn't remove `vpc: true` from config.
   let vpcConfig: { SubnetIds: string[]; SecurityGroupIds: string[] } | undefined;
   if (config.vpc && vpcState) {
     const subnetIds = vpcState.privateSubnetIds.length > 0
@@ -594,17 +598,26 @@ export async function applyLambda(
   if (current) {
     // Check for config drift
     const roleChanging = current.roleArn !== roleArn;
+    const needsVpcDetach = !config.vpc && current.vpcSubnetIds.length > 0;
     const needsConfigUpdate =
       current.runtime !== runtime ||
       current.memory !== memory ||
       current.timeout !== timeout ||
-      roleChanging;
+      roleChanging ||
+      needsVpcDetach;
 
     if (needsConfigUpdate || environment) {
-      console.log(`[lambda] Updating ${config.name} configuration`);
+      console.log(`[lambda] Updating ${config.name} configuration${needsVpcDetach ? ' (detaching from VPC)' : ''}`);
       // Only include Role in the update if it's actually changing.
       // Omitting Role preserves the existing role per AWS Lambda's "fields you don't
       // specify are preserved" behavior. This is the safety net for adoption.
+      // For VPC: send the desired config when attaching, empty arrays when
+      // detaching, and omit the field entirely otherwise.
+      const vpcUpdate = vpcConfig
+        ? { VpcConfig: vpcConfig }
+        : needsVpcDetach
+          ? { VpcConfig: { SubnetIds: [], SecurityGroupIds: [] } }
+          : {};
       await lambda.send(new UpdateFunctionConfigurationCommand({
         FunctionName: config.name,
         Runtime: runtime as Runtime,
@@ -613,7 +626,7 @@ export async function applyLambda(
         Environment: environment,
         Layers: config.layers,
         ...(roleChanging ? { Role: roleArn } : {}),
-        ...(vpcConfig ? { VpcConfig: vpcConfig } : {}),
+        ...vpcUpdate,
       }));
 
       // Wait for update
@@ -684,6 +697,8 @@ export async function applyLambda(
     codeSize: zipBuffer.length,
     lastModified: new Date().toISOString(),
     env: environment?.Variables ?? {},
+    vpcSubnetIds: vpcConfig?.SubnetIds ?? [],
+    vpcSecurityGroupIds: vpcConfig?.SecurityGroupIds ?? [],
   };
 }
 

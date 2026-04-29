@@ -28,7 +28,7 @@ import {
 } from '@aws-sdk/client-iam';
 import type { AwsContext } from '../aws.js';
 import type { IamManagedPolicyConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, canonicalize } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface ManagedPolicyState {
@@ -41,16 +41,6 @@ export interface ManagedPolicyState {
 
 function policyArn(accountId: string, name: string): string {
   return `arn:aws:iam::${accountId}:policy/${name}`;
-}
-
-/** Canonical JSON for stable equality (sorted keys, recursive). */
-function canonicalize(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalize).join(',')}]`;
-  if (v && typeof v === 'object') {
-    const keys = Object.keys(v as Record<string, unknown>).sort();
-    return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalize((v as any)[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v);
 }
 
 // ---------------------------------------------------------------------------

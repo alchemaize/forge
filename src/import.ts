@@ -14,6 +14,7 @@ import { fromIni } from '@aws-sdk/credential-providers';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
+import { lambdaName } from './aws.js';
 
 // Resolved at runtime so the generated config's import path always points to
 // THIS Forge installation, not a hardcoded one. Generated configs work from
@@ -263,25 +264,26 @@ async function importCognito(ctx: ImportContext): Promise<any | undefined> {
         console.log(`    [cognito] Found client: ${cc?.ClientName} (${cc?.ClientId})`);
       }
 
-      // Extract triggers
+      // Extract triggers. Use lambdaName() because Cognito sometimes stores
+      // versioned ARNs (`...:function:name:42`); split-pop would return "42".
       const triggers: any = {};
       const lambdaConfig = pool?.LambdaConfig;
       if (lambdaConfig?.PreTokenGeneration) {
-        triggers.preTokenGeneration = lambdaConfig.PreTokenGeneration.split(':').pop();
+        triggers.preTokenGeneration = lambdaName(lambdaConfig.PreTokenGeneration);
         console.log(`    [cognito] PreTokenGeneration trigger: ${triggers.preTokenGeneration}`);
       }
       if (lambdaConfig?.PostConfirmation) {
-        triggers.postConfirmation = lambdaConfig.PostConfirmation.split(':').pop();
+        triggers.postConfirmation = lambdaName(lambdaConfig.PostConfirmation);
         console.log(`    [cognito] PostConfirmation trigger: ${triggers.postConfirmation}`);
       }
       if (lambdaConfig?.PreSignUp) {
-        triggers.preSignUp = lambdaConfig.PreSignUp.split(':').pop();
+        triggers.preSignUp = lambdaName(lambdaConfig.PreSignUp);
       }
       if (lambdaConfig?.CustomMessage) {
-        triggers.customMessage = lambdaConfig.CustomMessage.split(':').pop();
+        triggers.customMessage = lambdaName(lambdaConfig.CustomMessage);
       }
       if (lambdaConfig?.CustomEmailSender?.LambdaArn) {
-        triggers.customEmailSender = lambdaConfig.CustomEmailSender.LambdaArn.split(':').pop();
+        triggers.customEmailSender = lambdaName(lambdaConfig.CustomEmailSender.LambdaArn);
         console.log(`    [cognito] CustomEmailSender trigger: ${triggers.customEmailSender}`);
       }
       if (lambdaConfig?.KMSKeyID) {
@@ -812,7 +814,9 @@ async function importEventBridge(ctx: ImportContext): Promise<any[]> {
       const targetsRes = await eb.send(new ListTargetsByRuleCommand({ Rule: ruleName }));
 
       const target = targetsRes.Targets?.[0];
-      const targetLambda = target?.Arn?.split(':').pop() ?? '';
+      // Use lambdaName so versioned/aliased ARNs collapse to the bare name
+      // instead of the version suffix.
+      const targetLambda = lambdaName(target?.Arn);
 
       const config: any = {
         name: ruleName,
