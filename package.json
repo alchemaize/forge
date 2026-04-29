@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Direct AWS infrastructure management. No stacks. No state files. No surprises.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "forge": "./bin/forge.mjs"
