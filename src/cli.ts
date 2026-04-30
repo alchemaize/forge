@@ -197,6 +197,9 @@ Examples:
         alarm: async () => (await import('./resources/cloudwatch.js')).destroyAlarm(ctx, resourceName),
         'route53-zone': async () => (await import('./resources/route53.js')).destroyHostedZone(),
         'acm-certificate': async () => (await import('./resources/acm.js')).destroyAcm(ctx, resourceName),
+        eventbridge: async () => (await import('./resources/eventbridge.js')).destroyEventBridge(ctx, resourceName),
+        'vpc-endpoint': async () => (await import('./resources/vpc-endpoint.js')).destroyVpcEndpoint(ctx, resourceName),
+        'ssm-parameter': async () => (await import('./resources/ssm.js')).destroySsmParameter(ctx, resourceName),
       };
 
       const handler = destroyRegistry[resourceType];

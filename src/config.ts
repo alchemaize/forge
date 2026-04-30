@@ -404,6 +404,12 @@ export interface EcsExpressConfig {
 
 export interface EventBridgeRuleConfig {
   name: string;
+  /**
+   * Event bus to attach the rule to. Defaults to 'default' (the per-account
+   * AWS-managed bus). Set this to a custom bus name (e.g., 'yeon-crm-events')
+   * to attach the rule to a bus declared in `eventBuses`.
+   */
+  eventBusName?: string;
   /** Cron or rate expression */
   schedule?: string;
   /** Event pattern (JSON) */
@@ -440,9 +446,62 @@ export interface IamRoleConfig {
 
 export interface SsmParameterConfig {
   name: string;
+  /**
+   * Parameter value. For SecureString parameters Forge stores the value
+   * encrypted with the AWS-managed `alias/aws/ssm` key by default; pass
+   * a kmsKeyId to use a customer-managed key.
+   *
+   * SECURITY: do not commit secrets to forge.config.ts. Use a setup
+   * script or pass via environment to keep them out of git. Forge import
+   * skips parameter values matching secret patterns by design.
+   */
   value: string;
-  type?: 'String' | 'SecureString';
+  type?: 'String' | 'SecureString' | 'StringList';
   description?: string;
+  /** Customer-managed KMS key for SecureString (optional). */
+  kmsKeyId?: string;
+  /** Tier (default: Standard). Advanced unlocks larger values + policies. */
+  tier?: 'Standard' | 'Advanced' | 'Intelligent-Tiering';
+}
+
+// ---------------------------------------------------------------------------
+// VPC Endpoints
+// ---------------------------------------------------------------------------
+
+export interface VpcEndpointConfig {
+  /**
+   * Service name to expose privately. Either:
+   *   - Short alias: 's3', 'dynamodb', 'ecr.api', 'ecr.dkr', 'secretsmanager',
+   *     'sts', 'kms', 'logs', 'monitoring', 'sqs', 'sns', 'lambda', 'events',
+   *     'ssm', 'ssmmessages', 'ec2messages'
+   *   - Full service name: 'com.amazonaws.us-east-1.s3'
+   * Forge expands the alias to the regional service name automatically.
+   */
+  service: string;
+  /**
+   * Endpoint type. Gateway is free and only available for s3 and dynamodb;
+   * everything else is Interface (per-AZ ENIs, $7.20/mo each plus data).
+   * Default: inferred from service ('s3' / 'dynamodb' → Gateway, else Interface).
+   */
+  type?: 'Gateway' | 'Interface';
+  /**
+   * VPC ID. If omitted, Forge uses the parent config's VPC (lookup mode)
+   * or the freshly-created VPC's ID (create mode).
+   */
+  vpcId?: string;
+  /**
+   * Route tables (Gateway endpoints) or subnets (Interface endpoints) the
+   * endpoint should be associated with. If omitted, Forge picks all the
+   * VPC's private subnets / route tables.
+   */
+  subnetIds?: string[];
+  routeTableIds?: string[];
+  /** Security group IDs (Interface endpoints only). */
+  securityGroupIds?: string[];
+  /** Private DNS — Interface endpoints only. Default: true. */
+  privateDnsEnabled?: boolean;
+  /** Endpoint policy (JSON). Default: full access. */
+  policy?: object;
 }
 
 // ---------------------------------------------------------------------------
@@ -931,6 +990,8 @@ export interface ForgeConfig {
   hostedZones?: Route53HostedZoneConfig[];
   /** ACM certificates (DNS validation pairs with hostedZones). */
   certificates?: AcmCertificateConfig[];
+  /** VPC endpoints (gateway: s3/dynamodb; interface: ECR / Secrets / etc.). */
+  vpcEndpoints?: VpcEndpointConfig[];
 }
 
 /**

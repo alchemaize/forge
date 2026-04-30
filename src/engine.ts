@@ -38,6 +38,9 @@ import * as sns from './resources/sns.js';
 import * as cloudwatch from './resources/cloudwatch.js';
 import * as route53 from './resources/route53.js';
 import * as acm from './resources/acm.js';
+import * as eventbridge from './resources/eventbridge.js';
+import * as vpcEndpoint from './resources/vpc-endpoint.js';
+import * as ssm from './resources/ssm.js';
 
 // ---------------------------------------------------------------------------
 // Plan
@@ -130,6 +133,24 @@ export async function plan(config: ForgeConfig): Promise<Plan> {
   // CloudWatch alarms. Plan after SNS so alarmTopicName references resolve.
   for (const alarmConfig of config.alarms ?? []) {
     await cloudwatch.planAlarm(ctx, alarmConfig, config.app, p);
+  }
+
+  // EventBridge rules. Plan after Lambda (rules reference Lambda targets)
+  // and event buses (rules can be on a custom bus).
+  for (const ebConfig of config.eventbridge ?? []) {
+    await eventbridge.planEventBridge(ctx, ebConfig, config.app, p);
+  }
+
+  // VPC endpoints. Plan after VPC.
+  for (const veConfig of config.vpcEndpoints ?? []) {
+    await vpcEndpoint.planVpcEndpoint(ctx, veConfig, config.app, p, config);
+  }
+
+  // SSM parameters. Plan-after-Lambda is fine because Lambda env is
+  // explicit (not parameter-resolved) and parameters are independent of
+  // other resources.
+  for (const ssmConfig of config.ssm ?? []) {
+    await ssm.planSsmParameter(ctx, ssmConfig, config.app, p);
   }
 
   // CloudFront
@@ -409,6 +430,29 @@ export async function apply(config: ForgeConfig): Promise<void> {
   if (config.alarms?.length) console.log(`▸ Phase: Alarms (${config.alarms.length})`);
   for (const alarmConfig of config.alarms ?? []) {
     await cloudwatch.applyAlarm(ctx, alarmConfig, config.app);
+  }
+
+  // Phase 17: EventBridge rules. After Lambda (rules reference Lambda
+  // targets) and after event buses (rules can attach to a custom bus).
+  if (config.eventbridge?.length) console.log(`▸ Phase: EventBridge rules (${config.eventbridge.length})`);
+  for (const ebConfig of config.eventbridge ?? []) {
+    await eventbridge.applyEventBridge(ctx, ebConfig, config.app);
+  }
+
+  // Phase 18: VPC endpoints. After VPC creation/lookup; vpcState
+  // carries the create-mode VPC's ID.
+  if (config.vpcEndpoints?.length) console.log(`▸ Phase: VPC Endpoints (${config.vpcEndpoints.length})`);
+  for (const veConfig of config.vpcEndpoints ?? []) {
+    await vpcEndpoint.applyVpcEndpoint(ctx, veConfig, config.app, config, vpcState?.vpcId);
+  }
+
+  // Phase 19: SSM parameters. Independent of every other phase; ordering
+  // matters only insofar as a Lambda env var that references a parameter
+  // expects the parameter to exist. Forge env vars are static (no
+  // parameter resolution), so any ordering works.
+  if (config.ssm?.length) console.log(`▸ Phase: SSM Parameters (${config.ssm.length})`);
+  for (const ssmConfig of config.ssm ?? []) {
+    await ssm.applySsmParameter(ctx, ssmConfig, config.app);
   }
 
   // Summary
@@ -711,6 +755,41 @@ export async function status(config: ForgeConfig): Promise<void> {
       console.log(`  Certificate: ${state.domainName} (${state.status})`);
     } else {
       console.log(`  Certificate: ${certConfig.domainName} — NOT FOUND`);
+    }
+  }
+
+  // EventBridge rules
+  for (const ebConfig of config.eventbridge ?? []) {
+    const state = await eventbridge.describeEventBridge(ctx, ebConfig);
+    if (state) {
+      const target = state.targetLambdaName ?? '(no target)';
+      const trigger = state.schedule ?? (state.eventPattern ? 'pattern' : 'unknown');
+      console.log(`  Rule: ${state.name} (${state.eventBusName}, ${state.state}, ${trigger} → ${target})`);
+    } else {
+      console.log(`  Rule: ${ebConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // VPC endpoints
+  for (const veConfig of config.vpcEndpoints ?? []) {
+    const state = await vpcEndpoint.describeVpcEndpoint(ctx, veConfig, config);
+    if (state) {
+      const associations = state.type === 'Gateway'
+        ? `${state.routeTableIds.length} route tables`
+        : `${state.subnetIds.length} subnets`;
+      console.log(`  VpcEndpoint: ${veConfig.service} (${state.type}, ${state.state}, ${associations})`);
+    } else {
+      console.log(`  VpcEndpoint: ${veConfig.service} — NOT FOUND`);
+    }
+  }
+
+  // SSM parameters
+  for (const ssmConfig of config.ssm ?? []) {
+    const state = await ssm.describeSsmParameter(ctx, ssmConfig);
+    if (state) {
+      console.log(`  Parameter: ${state.name} (${state.type}, v${state.version})`);
+    } else {
+      console.log(`  Parameter: ${ssmConfig.name} — NOT FOUND`);
     }
   }
 
