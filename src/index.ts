@@ -121,6 +121,7 @@ export { generateDiagram } from './diagram.js';
 
 export type { Plan, ChangeType, ResourceChange, FieldChange } from './diff.js';
 export { createPlan, displayPlan, addChange } from './diff.js';
+export { estimatePlanCost, displayCostPreview, type CostEstimate } from './cost.js';
 
 // ---------------------------------------------------------------------------
 // Resource modules

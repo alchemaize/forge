@@ -3,6 +3,8 @@
  * Shows what forge will do before doing it.
  */
 
+import { estimatePlanCost, displayCostPreview } from './cost.js';
+
 /**
  * Plan-level change classifications.
  *
@@ -149,5 +151,15 @@ export function displayPlan(plan: Plan): void {
   if (plan.summary.unchanged > 0) parts.push(colorize(`${plan.summary.unchanged} unchanged`, 'gray'));
 
   console.log(`  ${colorize('Summary:', 'bold')} ${parts.join(', ')}`);
-  console.log('');
+
+  // Cost preview: estimated $/month delta for create + destroy changes.
+  // cost.ts only imports types from this file (erased at runtime), so no
+  // circular runtime dependency exists.
+  try {
+    displayCostPreview(estimatePlanCost(plan));
+  } catch {
+    // Skip silently if anything goes wrong — never let the cost
+    // estimator break a plan output.
+    console.log('');
+  }
 }

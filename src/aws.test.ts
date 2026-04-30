@@ -271,3 +271,106 @@ test('withContext returns a ForgeAwsError', () => {
   assert.ok(wrapped instanceof ForgeError);
   assert.equal(wrapped.awsErrorName, 'AccessDeniedException');
 });
+
+// ---------------------------------------------------------------------------
+// Cost estimator
+// ---------------------------------------------------------------------------
+
+import { estimatePlanCost } from './cost.js';
+import { createPlan, addChange } from './diff.js';
+
+test('cost estimator: empty plan produces $0 net', () => {
+  const plan = createPlan();
+  const estimate = estimatePlanCost(plan);
+  assert.equal(estimate.createTotal, 0);
+  assert.equal(estimate.destroyTotal, 0);
+  assert.equal(estimate.netDelta, 0);
+});
+
+test('cost estimator: lambda create adds baseline cost', () => {
+  const plan = createPlan();
+  addChange(plan, {
+    resourceType: 'lambda',
+    resourceId: 'my-fn',
+    changeType: 'create',
+    tier: 'compute',
+    fields: [],
+  });
+  const estimate = estimatePlanCost(plan);
+  assert.ok(estimate.createTotal > 0);
+  assert.equal(estimate.netDelta, estimate.createTotal);
+  assert.equal(estimate.items.length, 1);
+});
+
+test('cost estimator: net delta = create - destroy', () => {
+  const plan = createPlan();
+  addChange(plan, {
+    resourceType: 'rds',
+    resourceId: 'new-db',
+    changeType: 'create',
+    tier: 'data',
+    fields: [{ field: 'mode', current: undefined, desired: 'aurora-serverless-v2' }],
+  });
+  addChange(plan, {
+    resourceType: 'rds',
+    resourceId: 'old-db',
+    changeType: 'destroy',
+    tier: 'data',
+    fields: [],
+  });
+  const estimate = estimatePlanCost(plan);
+  assert.equal(estimate.netDelta, estimate.createTotal - estimate.destroyTotal);
+  // Aurora Serverless v2 baseline ≈ $43, so delta should be ~0 when
+  // creating + destroying one each.
+  assert.ok(Math.abs(estimate.netDelta) < 5);
+});
+
+test('cost estimator: unknown resource types are reported, not silently dropped', () => {
+  const plan = createPlan();
+  addChange(plan, {
+    resourceType: 'totally-made-up-resource',
+    resourceId: 'foo',
+    changeType: 'create',
+    tier: 'compute',
+    fields: [],
+  });
+  const estimate = estimatePlanCost(plan);
+  assert.deepEqual(estimate.unknownTypes, ['totally-made-up-resource']);
+  assert.equal(estimate.createTotal, 0);
+});
+
+test('cost estimator: provisioned bedrock throughput uses model unit count', () => {
+  const plan = createPlan();
+  addChange(plan, {
+    resourceType: 'bedrock-throughput',
+    resourceId: 'bedrock-1',
+    changeType: 'create',
+    tier: 'compute',
+    fields: [{ field: 'modelUnits', current: undefined, desired: 2 }],
+  });
+  const estimate = estimatePlanCost(plan);
+  // 2 units × $39.60/hr × 730hr ≈ $57,816/mo (this is the eye-watering AWS reality)
+  assert.ok(estimate.createTotal > 50000);
+});
+
+test('cost estimator: unchanged changes are excluded from totals', () => {
+  const plan = createPlan();
+  addChange(plan, {
+    resourceType: 'lambda',
+    resourceId: 'my-fn',
+    changeType: 'unchanged',
+    tier: 'compute',
+    fields: [],
+  });
+  addChange(plan, {
+    resourceType: 'rds',
+    resourceId: 'my-db',
+    changeType: 'update',
+    tier: 'data',
+    fields: [],
+  });
+  const estimate = estimatePlanCost(plan);
+  assert.equal(estimate.createTotal, 0);
+  assert.equal(estimate.destroyTotal, 0);
+  assert.equal(estimate.items.length, 0);
+});

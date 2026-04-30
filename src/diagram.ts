@@ -315,6 +315,213 @@ function buildNodes(config: ForgeConfig): DiagramNode[] {
     });
   }
 
+  // --- Newer resource types (added in Q1-Q4 of the gap-analysis roadmap) ---
+  // Each gets a single node per type with a count, rather than one-node-per-
+  // resource which would produce unreadable diagrams for stacks with many
+  // (e.g., 30 SSM parameters or 15 SNS topics).
+
+  if (config.albs?.length) {
+    nodes.push({
+      id: 'alb',
+      importModule: 'diagrams.aws.network',
+      className: 'ELB',
+      label: `ALB\\n${config.albs.length} Load Balancer${config.albs.length > 1 ? 's' : ''}`,
+      scope: hasVpc ? 'public-subnet' : 'regional',
+    });
+  }
+  if (config.ecsClusters?.length || config.ecsServices?.length) {
+    const svcCount = config.ecsServices?.length ?? 0;
+    nodes.push({
+      id: 'ecs',
+      importModule: 'diagrams.aws.compute',
+      className: 'ECS',
+      label: `ECS Fargate\\n${svcCount} Service${svcCount > 1 ? 's' : ''}`,
+      scope: hasVpc ? 'private-subnet' : 'regional',
+    });
+  }
+  if (config.webAcls?.length) {
+    nodes.push({
+      id: 'waf',
+      importModule: 'diagrams.aws.security',
+      className: 'WAF',
+      label: `WAF\\n${config.webAcls.length} ACL${config.webAcls.length > 1 ? 's' : ''}`,
+      scope: 'external',
+    });
+  }
+  if (config.hostedZones?.length) {
+    nodes.push({
+      id: 'route53',
+      importModule: 'diagrams.aws.network',
+      className: 'Route53',
+      label: `Route 53\\n${config.hostedZones.length} Zone${config.hostedZones.length > 1 ? 's' : ''}`,
+      scope: 'external',
+    });
+  }
+  if (config.certificates?.length) {
+    nodes.push({
+      id: 'acm',
+      importModule: 'diagrams.aws.security',
+      className: 'CertificateManager',
+      label: `ACM\\n${config.certificates.length} Certificate${config.certificates.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+  if (config.restApis?.length) {
+    nodes.push({
+      id: 'restapi',
+      importModule: 'diagrams.aws.network',
+      className: 'APIGateway',
+      label: `API Gateway REST\\n${config.restApis.length} API${config.restApis.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+  if (config.vpcEndpoints?.length) {
+    nodes.push({
+      id: 'vpce',
+      importModule: 'diagrams.aws.network',
+      className: 'PrivateSubnet',  // Diagrams library doesn't have a VpcEndpoint icon; PrivateSubnet is closest
+      label: `VPC Endpoints\\n${config.vpcEndpoints.length}`,
+      scope: hasVpc ? 'private-subnet' : 'regional',
+    });
+  }
+  if (config.ssm?.length) {
+    nodes.push({
+      id: 'ssm',
+      importModule: 'diagrams.aws.management',
+      className: 'SystemsManagerParameterStore',
+      label: `SSM\\n${config.ssm.length} Parameter${config.ssm.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+  if (config.kms?.length) {
+    nodes.push({
+      id: 'kms',
+      importModule: 'diagrams.aws.security',
+      className: 'KMS',
+      label: `KMS\\n${config.kms.length} Key${config.kms.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+  if (config.secrets?.length) {
+    nodes.push({
+      id: 'secrets',
+      importModule: 'diagrams.aws.security',
+      className: 'SecretsManager',
+      label: `Secrets\\n${config.secrets.length}`,
+      scope: 'regional',
+    });
+  }
+  if (config.pinpoint?.length) {
+    nodes.push({
+      id: 'pinpoint',
+      importModule: 'diagrams.aws.engagement',
+      className: 'Pinpoint',
+      label: `Pinpoint\\n${config.pinpoint.length} App${config.pinpoint.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+  if (config.iamUsers?.length || config.iamGroups?.length) {
+    const userCount = config.iamUsers?.length ?? 0;
+    const groupCount = config.iamGroups?.length ?? 0;
+    const parts: string[] = [];
+    if (userCount > 0) parts.push(`${userCount} User${userCount > 1 ? 's' : ''}`);
+    if (groupCount > 0) parts.push(`${groupCount} Group${groupCount > 1 ? 's' : ''}`);
+    nodes.push({
+      id: 'iam',
+      importModule: 'diagrams.aws.security',
+      className: 'IAM',
+      label: `IAM\\n${parts.join(', ')}`,
+      scope: 'external',
+    });
+  }
+  if (config.logGroups?.length || config.alarms?.length) {
+    const logs = config.logGroups?.length ?? 0;
+    const alarms = config.alarms?.length ?? 0;
+    const parts: string[] = [];
+    if (logs > 0) parts.push(`${logs} Log Group${logs > 1 ? 's' : ''}`);
+    if (alarms > 0) parts.push(`${alarms} Alarm${alarms > 1 ? 's' : ''}`);
+    nodes.push({
+      id: 'cloudwatch',
+      importModule: 'diagrams.aws.management',
+      className: 'Cloudwatch',
+      label: `CloudWatch\\n${parts.join(', ')}`,
+      scope: 'regional',
+    });
+  }
+  if (config.autoScalingGroups?.length) {
+    nodes.push({
+      id: 'asg',
+      importModule: 'diagrams.aws.compute',
+      className: 'AutoScaling',
+      label: `ASG\\n${config.autoScalingGroups.length} Group${config.autoScalingGroups.length > 1 ? 's' : ''}`,
+      scope: hasVpc ? 'private-subnet' : 'regional',
+    });
+  }
+  if (config.bedrock?.provisionedThroughputs?.length || config.bedrock?.guardrails?.length) {
+    const pts = config.bedrock?.provisionedThroughputs?.length ?? 0;
+    const grs = config.bedrock?.guardrails?.length ?? 0;
+    const parts: string[] = [];
+    if (pts > 0) parts.push(`${pts} Throughput${pts > 1 ? 's' : ''}`);
+    if (grs > 0) parts.push(`${grs} Guardrail${grs > 1 ? 's' : ''}`);
+    nodes.push({
+      id: 'bedrock',
+      importModule: 'diagrams.aws.ml',
+      className: 'SagemakerModel',  // Diagrams library doesn't have a Bedrock icon; SagemakerModel is closest semantically
+      label: `Bedrock\\n${parts.join(', ')}`,
+      scope: 'regional',
+    });
+  }
+  if (config.sagemakerEndpoints?.length) {
+    nodes.push({
+      id: 'sagemaker',
+      importModule: 'diagrams.aws.ml',
+      className: 'Sagemaker',
+      label: `Sagemaker\\n${config.sagemakerEndpoints.length} Endpoint${config.sagemakerEndpoints.length > 1 ? 's' : ''}`,
+      scope: 'regional',
+    });
+  }
+  if (config.openSearchDomains?.length) {
+    nodes.push({
+      id: 'opensearch',
+      importModule: 'diagrams.aws.analytics',
+      className: 'ElasticsearchService',  // diagrams library still uses the old name
+      label: `OpenSearch\\n${config.openSearchDomains.length} Domain${config.openSearchDomains.length > 1 ? 's' : ''}`,
+      scope: hasVpc ? 'private-subnet' : 'regional',
+    });
+  }
+  if (config.glueDatabases?.length || config.athenaWorkgroups?.length) {
+    const gd = config.glueDatabases?.length ?? 0;
+    const aw = config.athenaWorkgroups?.length ?? 0;
+    const parts: string[] = [];
+    if (gd > 0) parts.push(`${gd} Glue DB${gd > 1 ? 's' : ''}`);
+    if (aw > 0) parts.push(`${aw} Athena WG${aw > 1 ? 's' : ''}`);
+    nodes.push({
+      id: 'analytics',
+      importModule: 'diagrams.aws.analytics',
+      className: 'Glue',
+      label: `Analytics\\n${parts.join(', ')}`,
+      scope: 'regional',
+    });
+  }
+  if (config.eventBuses?.length) {
+    nodes.push({
+      id: 'eventbus',
+      importModule: 'diagrams.aws.integration',
+      className: 'Eventbridge',
+      label: `EventBridge Buses\\n${config.eventBuses.length}`,
+      scope: 'regional',
+    });
+  }
+  if (config.lambdaLayers?.length) {
+    nodes.push({
+      id: 'layers',
+      importModule: 'diagrams.aws.compute',
+      className: 'Lambda',
+      label: `Lambda Layers\\n${config.lambdaLayers.length}`,
+      scope: 'regional',
+    });
+  }
+
   return nodes;
 }
 
