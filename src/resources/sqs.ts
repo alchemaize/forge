@@ -12,6 +12,7 @@ import {
   GetQueueAttributesCommand,
   CreateQueueCommand,
   SetQueueAttributesCommand,
+  type QueueAttributeName,
 } from '@aws-sdk/client-sqs';
 import type { AwsContext } from '../aws.js';
 import type { SqsQueueConfig } from '../config.js';
@@ -98,7 +99,7 @@ async function computeSqsDrift(
   if (Object.keys(desiredAttrs).length === 0) return {};
   const currentAttrs = await sqs.send(new GetQueueAttributesCommand({
     QueueUrl: queueUrl,
-    AttributeNames: Object.keys(desiredAttrs) as any,
+    AttributeNames: Object.keys(desiredAttrs) as QueueAttributeName[],
   }));
   const current = (currentAttrs.Attributes ?? {}) as Record<string, string>;
   const drift: Record<string, string> = {};

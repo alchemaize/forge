@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lambdaName, toLambdaArn, canonicalize } from './aws.js';
+import { lambdaName, toLambdaArn, canonicalize, templatizeName, withContext } from './aws.js';
+import { fromIni } from '@aws-sdk/credential-providers';
+
+const ctx = {
+  profile: 'test',
+  region: 'us-east-1',
+  accountId: '123456789012',
+  credentials: fromIni({ profile: 'test' }),
+};
 
 test('lambdaName: bare function name passes through', () => {
   assert.equal(lambdaName('myFunc'), 'myFunc');
@@ -133,4 +141,86 @@ test('canonicalize: differing values produce different output', () => {
 
 test('canonicalize: empty object and empty array are distinct', () => {
   assert.notEqual(canonicalize({}), canonicalize([]));
+});
+
+// ---------------------------------------------------------------------------
+// templatizeName
+// ---------------------------------------------------------------------------
+
+test('templatizeName: replaces standalone account ID', () => {
+  assert.equal(
+    templatizeName('myapp-data-123456789012-us-east-1', ctx),
+    'myapp-data-{account}-{region}'
+  );
+});
+
+test('templatizeName: leaves coincidentally-matching digit substrings alone', () => {
+  // The 12 digits of the account ID could theoretically appear inside a
+  // longer numeric run (e.g. CFN-generated UUID suffixes). The regex
+  // anchors on non-digit boundaries to avoid corrupting those.
+  assert.equal(
+    templatizeName('myapp-1234567890123', ctx),  // 13 digits, account is the first 12
+    'myapp-1234567890123'
+  );
+});
+
+test('templatizeName: account ID at start works', () => {
+  assert.equal(
+    templatizeName('123456789012-bucket', ctx),
+    '{account}-bucket'
+  );
+});
+
+test('templatizeName: replaces region when standalone', () => {
+  assert.equal(
+    templatizeName('lambda-us-east-1-foo', ctx),
+    'lambda-{region}-foo'
+  );
+});
+
+test('templatizeName: leaves region untouched inside compound names', () => {
+  // 'us-east-1a' is an availability zone suffix; we don't want to
+  // chop the trailing 'a'.
+  assert.equal(
+    templatizeName('lambda-us-east-1a-foo', ctx),
+    'lambda-us-east-1a-foo'
+  );
+});
+
+test('templatizeName: handles multiple account IDs in one string', () => {
+  assert.equal(
+    templatizeName('arn:aws:iam::123456789012:role/foo-123456789012', ctx),
+    'arn:aws:iam::{account}:role/foo-{account}'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// withContext
+// ---------------------------------------------------------------------------
+
+test('withContext: adds prefix and AccessDenied hint', () => {
+  const err = new Error('User is not authorized');
+  (err as { name?: string }).name = 'AccessDeniedException';
+  const wrapped = withContext('[lambda] creating myFunc', err);
+  assert.match(wrapped.message, /\[lambda\] creating myFunc/);
+  assert.match(wrapped.message, /Hint:.*permissions/);
+});
+
+test('withContext: ExpiredToken hint mentions sso login', () => {
+  const err = new Error('Token has expired');
+  (err as { name?: string }).name = 'ExpiredTokenException';
+  const wrapped = withContext('[apply] phase', err);
+  assert.match(wrapped.message, /sso login/);
+});
+
+test('withContext: passes through unhinted errors with prefix only', () => {
+  const err = new Error('Some weird internal error');
+  (err as { name?: string }).name = 'WeirdInternalError';
+  const wrapped = withContext('[apply] foo', err);
+  assert.equal(wrapped.message, '[apply] foo: Some weird internal error');
+});
+
+test('withContext: handles non-Error values', () => {
+  const wrapped = withContext('[apply] foo', 'a string thrown directly');
+  assert.equal(wrapped.message, '[apply] foo: a string thrown directly');
 });

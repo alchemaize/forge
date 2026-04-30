@@ -220,7 +220,17 @@ Examples:
 }
 
 main().catch(err => {
+  // The error message already carries module-level context like
+  // "[lambda] foo: ResourceNotFoundException" because each resource
+  // module prefixes its throws with the resource type. The withContext
+  // helper in aws.ts adds actionable hints for common SDK failure modes
+  // (AccessDenied, ExpiredToken, ThrottlingException, etc.). Print the
+  // assembled message; show the stack only with DEBUG=1 set so users
+  // get clean output by default.
   console.error(`\nFatal: ${err.message}`);
-  if (process.env.DEBUG) console.error(err.stack);
+  if (process.env.DEBUG) {
+    console.error('');
+    console.error(err.stack);
+  }
   process.exit(1);
 });

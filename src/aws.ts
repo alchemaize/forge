@@ -93,6 +93,69 @@ export function resolveTemplate(template: string, ctx: AwsContext, app: string):
     .replace(/\{app\}/g, app);
 }
 
+/**
+ * Inverse of resolveTemplate: replace account ID and region in a value
+ * (typically a captured AWS resource name) with `{account}` / `{region}`
+ * placeholders, so generated configs are portable across accounts.
+ *
+ * Earlier the import path used a raw `value.replace(ctx.accountId, '{account}')`
+ * which would corrupt strings if the 12-digit account ID happened to appear
+ * inside a longer numeric suffix (CFN-generated UUIDs sometimes embed
+ * coincidentally matching digit runs). This anchors on non-digit
+ * boundaries so only standalone account-ID occurrences get rewritten.
+ */
+export function templatizeName(value: string, ctx: AwsContext): string {
+  // Account ID: 12-digit run, NOT preceded or followed by another digit.
+  const accountPattern = new RegExp(`(^|[^0-9])${ctx.accountId}(?![0-9])`, 'g');
+  // Region: standard AWS pattern (us-east-1 / eu-west-2 / etc.). Anchor on
+  // alphanumeric boundaries — must be preceded by start-of-string or a
+  // non-alphanumeric (so `us-east-1` matches inside `lambda-us-east-1-foo`
+  // but not inside `pus-east-1ish`), and followed by a non-alphanumeric
+  // (so the AZ `us-east-1a` doesn't match because the trailing `a` would
+  // be part of the AZ name, not a separator).
+  const regionPattern = new RegExp(`(^|[^a-z0-9])${ctx.region}(?![a-z0-9])`, 'g');
+  return value
+    .replace(accountPattern, (_, before) => `${before}{account}`)
+    .replace(regionPattern, (_, before) => `${before}{region}`);
+}
+
+// ---------------------------------------------------------------------------
+// Error wrapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap an SDK error with actionable context. Forge tries to give every
+ * user-facing error a "what to do next" line so the user isn't staring
+ * at a raw AccessDeniedException with no idea where to go.
+ *
+ * Usage:
+ *   try { await sdkCall() } catch (err) { throw withContext('[lambda] creating myapp-api', err); }
+ */
+export function withContext(prefix: string, err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  const name = (err as { name?: string }).name ?? '';
+
+  let hint = '';
+  if (name === 'AccessDeniedException' || name === 'AccessDenied' || /access denied/i.test(msg)) {
+    hint = '\n  Hint: the AWS profile likely lacks permissions for this call. Check the IAM policy on the profile or assumed role.';
+  } else if (name === 'ResourceNotFoundException' || name === 'NotFound') {
+    hint = '\n  Hint: the resource was expected to exist. Check the name in your forge.config.ts and confirm the profile points at the right account/region.';
+  } else if (name === 'ValidationException') {
+    hint = '\n  Hint: AWS rejected the request shape. The error message above usually names the bad field.';
+  } else if (name === 'ThrottlingException' || name === 'RequestLimitExceeded') {
+    hint = '\n  Hint: AWS is rate-limiting. Forge retries automatically (adaptive); persistent throttles mean the account is hitting service quotas. Wait a minute or open a quota request.';
+  } else if (name === 'ResourceConflictException' || name === 'AlreadyExists') {
+    hint = '\n  Hint: a resource with this name already exists. If you meant to adopt it, ensure your config name matches AWS exactly. If you meant to recreate, destroy first via the AWS Console.';
+  } else if (name === 'CredentialsProviderError' || name === 'ExpiredTokenException' || /expired/i.test(msg)) {
+    hint = '\n  Hint: AWS credentials are expired or invalid. Re-run `aws sso login --profile <profile>` if SSO, or refresh static credentials in ~/.aws/credentials.';
+  }
+
+  const wrapped = new Error(`${prefix}: ${msg}${hint}`);
+  if (err instanceof Error && err.stack) wrapped.stack = err.stack;
+  (wrapped as { name?: string }).name = name || 'ForgeError';
+  return wrapped;
+}
+
 // ---------------------------------------------------------------------------
 // ARN helpers
 // ---------------------------------------------------------------------------
@@ -145,6 +208,7 @@ export function canonicalize(obj: unknown): string {
   if (obj === null || obj === undefined) return 'null';
   if (typeof obj !== 'object') return JSON.stringify(obj);
   if (Array.isArray(obj)) return `[${obj.map(canonicalize).join(',')}]`;
-  const keys = Object.keys(obj as Record<string, unknown>).sort();
-  return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalize((obj as any)[k])}`).join(',')}}`;
+  const o = obj as Record<string, unknown>;
+  const keys = Object.keys(o).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${canonicalize(o[k])}`).join(',')}}`;
 }

@@ -22,6 +22,8 @@ import {
   ListLayerVersionsCommand,
   PublishLayerVersionCommand,
   GetLayerVersionCommand,
+  type Runtime,
+  type Architecture,
 } from '@aws-sdk/client-lambda';
 import { readFileSync, existsSync } from 'fs';
 import type { AwsContext } from '../aws.js';
@@ -146,8 +148,11 @@ export async function applyLayer(
     LayerName: config.name,
     Description: config.description,
     Content: { ZipFile: zipBuffer },
-    CompatibleRuntimes: config.compatibleRuntimes as any,
-    CompatibleArchitectures: config.compatibleArchitectures as any,
+    // The SDK enums are string-literal unions; Forge config carries plain
+    // strings to keep the user surface simple. Cast via the proper SDK
+    // type (not `any`) so a typo in the config still fails compilation.
+    CompatibleRuntimes: config.compatibleRuntimes as Runtime[] | undefined,
+    CompatibleArchitectures: config.compatibleArchitectures as Architecture[] | undefined,
   }));
 
   console.log(`[lambda-layer] Published: ${res.LayerVersionArn}`);

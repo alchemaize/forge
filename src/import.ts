@@ -14,7 +14,7 @@ import { fromIni } from '@aws-sdk/credential-providers';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { lambdaName } from './aws.js';
+import { lambdaName, templatizeName } from './aws.js';
 
 // Resolved at runtime so the generated config's import path always points to
 // THIS Forge installation, not a hardcoded one. Generated configs work from
@@ -732,10 +732,10 @@ async function importS3(ctx: ImportContext): Promise<any[]> {
     const bucketName = br.PhysicalResourceId;
     console.log(`  [s3] Found: ${bucketName}`);
 
-    // Replace account ID and region with placeholders for portability
-    let templateName = bucketName;
-    templateName = templateName.replace(ctx.accountId, '{account}');
-    templateName = templateName.replace(ctx.region, '{region}');
+    // Replace account ID and region with placeholders for portability.
+    // templatizeName anchors on non-digit/non-alpha boundaries so a
+    // coincidentally-matching digit run inside a longer ID isn't corrupted.
+    const templateName = templatizeName(bucketName, ctx);
 
     const config: any = {
       name: templateName,
@@ -1288,14 +1288,24 @@ function formatKey(key: string): string {
   return `'${key.replace(/'/g, "\\'")}'`;
 }
 
+/**
+ * Maximum column width for inline object/array literals before formatObject
+ * breaks them across multiple lines. Matches the project's prettier-like
+ * default; overflowing this much is more readable as a multi-line block.
+ */
+const INLINE_WIDTH = 80;
+
 function formatObject(obj: any, indent: number): string {
   const pad = ' '.repeat(indent);
   const innerPad = ' '.repeat(indent + 2);
 
   if (Array.isArray(obj)) {
     if (obj.length === 0) return '[]';
+    // String-only arrays: try inline first; multi-line if the inline form
+    // would overflow INLINE_WIDTH at this indent depth.
     if (obj.every(item => typeof item === 'string')) {
-      return `[${obj.map(s => `'${s}'`).join(', ')}]`;
+      const inline = `[${obj.map(s => formatValue(s)).join(', ')}]`;
+      if (indent + inline.length <= INLINE_WIDTH) return inline;
     }
     const items = obj.map(item => {
       if (typeof item === 'object' && item !== null) {
@@ -1309,10 +1319,18 @@ function formatObject(obj: any, indent: number): string {
   const entries = Object.entries(obj).filter(([_, v]) => v !== undefined && v !== null);
   if (entries.length === 0) return '{}';
 
-  // Short objects on one line
-  if (entries.length <= 2 && entries.every(([_, v]) => typeof v !== 'object')) {
+  // Inline an object only when:
+  //   1. None of its values are nested objects/arrays
+  //   2. The fully-rendered inline form fits in INLINE_WIDTH columns at
+  //      the current indent depth
+  // This replaces the earlier `entries.length <= 2` rule which was
+  // arbitrary: 3-key objects of short strings produced unnecessary
+  // multi-line output, and 2-key objects with long values overflowed.
+  const allPrimitive = entries.every(([, v]) => typeof v !== 'object' || v === null);
+  if (allPrimitive) {
     const pairs = entries.map(([k, v]) => `${formatKey(k)}: ${formatValue(v)}`);
-    return `{ ${pairs.join(', ')} }`;
+    const inline = `{ ${pairs.join(', ')} }`;
+    if (indent + inline.length <= INLINE_WIDTH) return inline;
   }
 
   const lines = entries.map(([key, value]) => {
@@ -1442,11 +1460,16 @@ export async function importStack(
   config.s3 = await importS3(ctx);
   config.eventbridge = await importEventBridge(ctx);
 
-  // Clean up empty arrays
-  if (config.lambda?.length === 0) config.lambda = undefined;
-  if (config.dynamodb?.length === 0) config.dynamodb = undefined;
-  if (config.s3?.length === 0) config.s3 = undefined;
-  if (config.eventbridge?.length === 0) config.eventbridge = undefined;
+  // Strip empty top-level arrays so the generated config stays tidy.
+  // Walks every key generically rather than naming individual fields, so
+  // new resource types that get added to the import surface don't pollute
+  // output with `kms: []`-style noise.
+  for (const key of Object.keys(config) as Array<keyof typeof config>) {
+    const value = config[key];
+    if (Array.isArray(value) && value.length === 0) {
+      delete config[key];
+    }
+  }
 
   // Generate config file
   console.log('\n  Generating forge config...\n');

@@ -20,7 +20,7 @@ import { fromIni } from '@aws-sdk/credential-providers';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
-import { lambdaName } from './aws.js';
+import { lambdaName, templatizeName } from './aws.js';
 
 // See import.ts for rationale — generated configs use absolute path to this Forge.
 const FORGE_CONFIG_PATH = resolve(dirname(fileURLToPath(import.meta.url)), 'config.js');
@@ -279,9 +279,7 @@ async function discoverS3(ctx: DiscoverContext): Promise<any[]> {
     if (nameMatches(name, ctx.appName)) {
       console.log(`    Found S3 bucket: ${name}`);
 
-      let templateName = name
-        .replace(ctx.accountId, '{account}')
-        .replace(ctx.region, '{region}');
+      const templateName = templatizeName(name, ctx);
 
       const config: any = { name: templateName, encryption: 'AES256', blockPublicAccess: true };
 

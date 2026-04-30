@@ -3,6 +3,16 @@
  * Shows what forge will do before doing it.
  */
 
+/**
+ * Plan-level change classifications.
+ *
+ * `destroy` is reserved but not currently emitted by `forge plan` runs.
+ * The `forge destroy` CLI subcommand operates outside the plan flow; it
+ * runs a single named resource through its module's destroy function
+ * rather than producing a plan + apply cycle. The destroy variant exists
+ * here so a future "orphan detection" mode can flag resources present in
+ * AWS but absent from the config without changing the plan-output schema.
+ */
 export type ChangeType = 'create' | 'update' | 'unchanged' | 'destroy';
 
 export interface FieldChange {

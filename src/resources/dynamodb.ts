@@ -13,6 +13,7 @@ import {
   UpdateTimeToLiveCommand,
   DescribeTimeToLiveCommand,
   ListTablesCommand,
+  ProjectionType,
   type ScalarAttributeType,
 } from '@aws-sdk/client-dynamodb';
 import type { AwsContext } from '../aws.js';
@@ -170,7 +171,11 @@ export async function applyDynamoTable(
         ...(g.sk ? [{ AttributeName: g.sk, KeyType: 'RANGE' as const }] : []),
       ],
       Projection: {
-        ProjectionType: (Array.isArray(g.projection) ? 'INCLUDE' : (g.projection ?? 'ALL')) as any,
+        ProjectionType: (Array.isArray(g.projection)
+          ? ProjectionType.INCLUDE
+          : (g.projection === 'KEYS_ONLY'
+              ? ProjectionType.KEYS_ONLY
+              : ProjectionType.ALL)),
         ...(Array.isArray(g.projection) ? { NonKeyAttributes: g.projection } : {}),
       },
     }));
@@ -237,7 +242,11 @@ export async function applyDynamoTable(
                 ...(gsi.sk ? [{ AttributeName: gsi.sk, KeyType: 'RANGE' as const }] : []),
               ],
               Projection: {
-                ProjectionType: (Array.isArray(gsi.projection) ? 'INCLUDE' : (gsi.projection ?? 'ALL')) as any,
+                ProjectionType: (Array.isArray(gsi.projection)
+                  ? ProjectionType.INCLUDE
+                  : (gsi.projection === 'KEYS_ONLY'
+                      ? ProjectionType.KEYS_ONLY
+                      : ProjectionType.ALL)),
                 ...(Array.isArray(gsi.projection) ? { NonKeyAttributes: gsi.projection } : {}),
               },
             },

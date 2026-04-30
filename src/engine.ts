@@ -13,7 +13,7 @@
  */
 
 import type { ForgeConfig } from './config.js';
-import { initAwsContext, type AwsContext } from './aws.js';
+import { initAwsContext, withContext, type AwsContext } from './aws.js';
 import { createPlan, displayPlan, type Plan } from './diff.js';
 import * as vpc from './resources/vpc.js';
 import * as rds from './resources/rds.js';
@@ -143,6 +143,20 @@ export async function plan(config: ForgeConfig): Promise<Plan> {
 // Apply
 // ---------------------------------------------------------------------------
 
+/**
+ * Run a phase step and rethrow any failure with an actionable prefix.
+ * Wraps SDK errors with hints (AccessDenied → check IAM, ExpiredToken →
+ * re-login, etc.) via withContext. Resource-level context like the
+ * resource name comes from the modules' own logging.
+ */
+async function runPhase<T>(phaseLabel: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    throw withContext(`[apply] ${phaseLabel}`, err);
+  }
+}
+
 export async function apply(config: ForgeConfig): Promise<void> {
   const ctx = await initAwsContext(config);
 
@@ -152,16 +166,16 @@ export async function apply(config: ForgeConfig): Promise<void> {
   let vpcState: vpc.VpcState | undefined;
   if (config.vpc) {
     console.log(`▸ Phase: VPC (${config.vpc.mode})`);
-    vpcState = await vpc.applyVpc(ctx, config.vpc, config.app);
+    vpcState = await runPhase('VPC', () => vpc.applyVpc(ctx, config.vpc!, config.app));
     console.log('');
   }
 
   // Phase 2: RDS
   let rdsState: rds.RdsState | undefined;
   if (config.rds) {
-    if (!vpcState) throw new Error('RDS requires VPC config');
+    if (!vpcState) throw new Error('RDS requires VPC config. Add a vpc block to forge.config.ts (mode: "lookup" with vpcId, or mode: "create").');
     console.log(`▸ Phase: RDS (${config.rds.mode})`);
-    rdsState = await rds.applyRds(ctx, config.rds, config.app, vpcState);
+    rdsState = await runPhase('RDS', () => rds.applyRds(ctx, config.rds!, config.app, vpcState!));
     console.log('');
   }
 
@@ -291,13 +305,13 @@ export async function apply(config: ForgeConfig): Promise<void> {
   let apiGwState: apiGateway.ApiGatewayState | undefined;
   if (config.apiGateway && lambdaStates.length > 0) {
     console.log('▸ Phase: API Gateway');
-    apiGwState = await apiGateway.applyApiGateway(
+    apiGwState = await runPhase('API Gateway', () => apiGateway.applyApiGateway(
       ctx,
-      config.apiGateway,
+      config.apiGateway!,
       config.app,
       lambdaStates,
       cognitoState
-    );
+    ));
     console.log('');
   }
 

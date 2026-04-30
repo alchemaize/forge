@@ -19,6 +19,7 @@ import {
   CreateUserPoolDomainCommand,
   DescribeUserPoolDomainCommand,
   AddCustomAttributesCommand,
+  UserPoolMfaType,
   type ExplicitAuthFlowsType,
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { AwsContext } from '../aws.js';
@@ -204,7 +205,13 @@ export async function applyCognito(
       AutoVerifiedAttributes: ['email'],
       UsernameAttributes: ['email'],
       UsernameConfiguration: { CaseSensitive: false },
-      MfaConfiguration: (config.mfa ?? 'OFF') as any,
+      // Forge config uses 'REQUIRED' to match AWS Console terminology
+      // ("MFA Required"); the SDK enum spells the same thing as 'ON'.
+      MfaConfiguration: (config.mfa === 'REQUIRED'
+        ? UserPoolMfaType.ON
+        : config.mfa === 'OPTIONAL'
+          ? UserPoolMfaType.OPTIONAL
+          : UserPoolMfaType.OFF),
       Policies: {
         PasswordPolicy: passwordPolicy ?? {
           MinimumLength: 8,
