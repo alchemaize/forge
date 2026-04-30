@@ -27,9 +27,8 @@ import {
 } from '@aws-sdk/client-ec2';
 import type { AwsContext } from '../aws.js';
 import type { SecurityGroupConfig, SecurityGroupRule, ForgeConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface SecurityGroupState {
   groupId: string;
   groupName: string;
@@ -388,7 +387,7 @@ async function pruneExtraRules(
 }
 
 export async function destroySecurityGroup(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy security groups. Lambdas, RDS, EC2, and any\n' +
     'other resource referencing the SG by ID would break. Detach first, then\n' +
     'use AWS Console or CLI to delete.'

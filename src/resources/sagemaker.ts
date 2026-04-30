@@ -31,9 +31,8 @@ import {
 } from '@aws-sdk/client-sagemaker';
 import type { AwsContext } from '../aws.js';
 import type { SagemakerEndpointConfig } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface SagemakerEndpointState {
   name: string;
   arn: string;
@@ -232,7 +231,7 @@ export async function applySagemakerEndpoint(
 }
 
 export async function destroySagemakerEndpoint(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Sagemaker endpoints. Inference traffic\n' +
     'fails immediately. Drain traffic first via Route 53 / consumer\n' +
     'changes, then DeleteEndpoint via AWS Console.'

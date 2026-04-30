@@ -32,9 +32,8 @@ import {
 } from '@aws-sdk/client-wafv2';
 import type { AwsContext } from '../aws.js';
 import type { WafWebAclConfig, WafRuleConfig } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface WebAclState {
   id: string;
   name: string;
@@ -343,7 +342,7 @@ export async function applyWebAcl(
 export async function destroyWebAcl(): Promise<never> {
   // Keep DisassociateWebACLCommand reachable for future fine-grained destroys.
   void DisassociateWebACLCommand;
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy WAF web ACLs. Removing protections from a\n' +
     'public-facing endpoint silently exposes it. Disassociate from each\n' +
     'resource first, then DeleteWebACL via AWS Console.'

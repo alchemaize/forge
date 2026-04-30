@@ -50,9 +50,8 @@ import { randomBytes } from 'crypto';
 import type { AwsContext } from '../aws.js';
 import type { RdsConfig } from '../config.js';
 import type { VpcState } from './vpc.js';
-import { getClient, awaitIamPropagation } from '../aws.js';
+import { getClient, awaitIamPropagation, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface RdsState {
   mode: 'aurora-serverless-v2' | 'instance';
   clusterId?: string;
@@ -847,7 +846,7 @@ async function createProxy(
  * Destroy — REFUSED for database resources.
  */
 export async function destroyRds(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy database resources. Data loss is irreversible.\n' +
     'To delete an RDS instance or Aurora cluster, use the AWS Console or CLI manually.\n' +
     'For Aurora: disable deletion protection, delete instances first, then delete cluster.\n' +

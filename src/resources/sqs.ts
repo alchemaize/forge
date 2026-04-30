@@ -16,9 +16,8 @@ import {
 } from '@aws-sdk/client-sqs';
 import type { AwsContext } from '../aws.js';
 import type { SqsQueueConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface SqsState {
   queueUrl: string;
   queueArn: string;
@@ -224,7 +223,7 @@ export async function applySqs(
 }
 
 export async function destroySqs(name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy SQS queue '${name}'. In-flight messages would be lost.\n` +
     `Drain the queue first (verify ApproximateNumberOfMessages = 0), then delete via\n` +
     `AWS Console or CLI manually.`

@@ -39,9 +39,8 @@ import type {
   LaunchTemplateConfig,
   AutoScalingGroupConfig,
 } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // ===========================================================================
 // LAUNCH TEMPLATES
 // ===========================================================================
@@ -192,7 +191,7 @@ export async function applyLaunchTemplate(
 }
 
 export async function destroyLaunchTemplate(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy launch templates. ASGs referencing the\n' +
     'template fail to launch new instances. Detach from ASGs first.'
   );
@@ -351,7 +350,7 @@ export async function applyAsg(
 }
 
 export async function destroyAsg(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Auto Scaling Groups. Running instances are\n' +
     'terminated; in-flight requests dropped. Set min/max/desired to 0\n' +
     'first, wait for instances to drain, then DeleteAutoScalingGroup.'

@@ -44,9 +44,8 @@ import type {
   CloudWatchLogGroupConfig,
   CloudWatchAlarmConfig,
 } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // ===========================================================================
 // LOG GROUPS
 // ===========================================================================
@@ -180,7 +179,7 @@ export async function destroyLogGroup(
   confirmDataLoss: boolean
 ): Promise<void> {
   if (!confirmDataLoss) {
-    throw new Error(
+    throw new ForgeRefusedError(
       `forge refuses to destroy log group '${name}' without --confirm-data-loss flag.\n` +
       'Logs are data-tier; deletion is irreversible. Re-run with --confirm-data-loss\n' +
       'to proceed.'

@@ -28,9 +28,8 @@ import {
 } from '@aws-sdk/client-iam';
 import type { AwsContext } from '../aws.js';
 import type { IamManagedPolicyConfig } from '../config.js';
-import { getClient, canonicalize } from '../aws.js';
+import { getClient, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface ManagedPolicyState {
   name: string;
   arn: string;
@@ -205,7 +204,7 @@ export async function applyManagedPolicy(
 // ---------------------------------------------------------------------------
 
 export async function destroyManagedPolicy(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy IAM managed policies. The policy is likely attached to\n' +
     'roles; deletion would break those roles\' permissions immediately. Detach from\n' +
     'all roles first, then delete via AWS Console or CLI manually.'

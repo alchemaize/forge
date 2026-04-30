@@ -28,9 +28,8 @@ import {
 } from '@aws-sdk/client-ssm';
 import type { AwsContext } from '../aws.js';
 import type { SsmParameterConfig } from '../config.js';
-import { getClient, withContext } from '../aws.js';
+import { getClient, withContext, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface SsmParameterState {
   name: string;
   type: 'String' | 'StringList' | 'SecureString';
@@ -203,7 +202,7 @@ export async function applySsmParameter(
 // ---------------------------------------------------------------------------
 
 export async function destroySsmParameter(_ctx: AwsContext, name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy SSM parameter '${name}'. Other resources\n` +
     'may be reading it at runtime; deletion produces silent ParameterNotFound\n' +
     'failures the next time anything reaches for the value. Confirm no\n' +

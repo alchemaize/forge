@@ -27,9 +27,8 @@ import type {
   Route53HostedZoneConfig,
   Route53RecordConfig,
 } from '../config.js';
-import { getClient, withContext } from '../aws.js';
+import { getClient, withContext, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface HostedZoneState {
   zoneId: string;
   name: string;
@@ -280,7 +279,7 @@ export async function applyHostedZone(
 // ---------------------------------------------------------------------------
 
 export async function destroyHostedZone(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Route 53 hosted zones. The zone often holds\n' +
     'records owned by humans outside Forge (manually-created MX, SPF, etc.)\n' +
     'and deletion would silently take them with it. Delete via AWS Console.'

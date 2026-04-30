@@ -54,9 +54,8 @@ import type {
   EcsTaskDefConfig,
   ForgeConfig,
 } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // ===========================================================================
 // CLUSTERS
 // ===========================================================================
@@ -548,14 +547,14 @@ async function applyAutoScaling(
 // ===========================================================================
 
 export async function destroyEcsCluster(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy ECS clusters. Running services would fail; manual\n' +
     'cleanup via Console is the right path.'
   );
 }
 
 export async function destroyEcsService(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy ECS services. The workload goes offline immediately\n' +
     'and load balancer target groups become empty. Drain manually first.'
   );

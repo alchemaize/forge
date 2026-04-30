@@ -19,9 +19,8 @@ import {
 } from '@aws-sdk/client-secrets-manager';
 import type { AwsContext } from '../aws.js';
 import type { SecretConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface SecretState {
   name: string;
   arn: string;
@@ -131,7 +130,7 @@ export async function applySecret(
 // ---------------------------------------------------------------------------
 
 export async function destroySecret(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy SecretsManager secrets. Deletion has a 7-30 day pending\n' +
     'window during which anything reading the secret fails. To delete, use the AWS\n' +
     'Console manually after confirming nothing depends on the secret.'

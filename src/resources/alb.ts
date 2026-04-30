@@ -38,9 +38,8 @@ import {
 } from '@aws-sdk/client-elastic-load-balancing-v2';
 import type { AwsContext } from '../aws.js';
 import type { AlbConfig, ForgeConfig, AlbListenerRuleConfig } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface AlbState {
   loadBalancerArn: string;
   dnsName: string;
@@ -424,7 +423,7 @@ function buildRuleConditions(rule: AlbListenerRuleConfig) {
 export async function destroyAlb(_ctx: AwsContext, name: string): Promise<never> {
   // Keep DeleteRuleCommand reachable for future fine-grained destroys.
   void DeleteRuleCommand;
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy ALB '${name}' automatically. Sites pointing at the ALB go\n` +
     'offline immediately on delete; Route 53 alias records break. Confirm no consumers,\n' +
     'then DeleteLoadBalancer via the AWS Console.'

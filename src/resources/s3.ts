@@ -34,9 +34,8 @@ import {
 } from '@aws-sdk/client-s3';
 import type { AwsContext } from '../aws.js';
 import type { S3BucketConfig } from '../config.js';
-import { getClient, resolveTemplate, canonicalize } from '../aws.js';
+import { getClient, resolveTemplate, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface S3BucketState {
   bucketName: string;
   exists: boolean;
@@ -482,7 +481,7 @@ export async function destroyS3Bucket(
   confirmDataLoss: boolean
 ): Promise<void> {
   if (!confirmDataLoss) {
-    throw new Error(
+    throw new ForgeRefusedError(
       `forge refuses to destroy S3 bucket '${bucketName}' without --confirm-data-loss flag.\n` +
       'This is a data-tier resource. Deletion is irreversible.'
     );

@@ -137,6 +137,74 @@ export function templatizeName(value: string, ctx: AwsContext): string {
 }
 
 // ---------------------------------------------------------------------------
+// Error class hierarchy
+// ---------------------------------------------------------------------------
+
+/**
+ * Base class for any error Forge raises intentionally. Lets callers
+ * distinguish "Forge said no" from "the AWS SDK threw" via instanceof.
+ *
+ * Hierarchy:
+ *   ForgeError (abstract base)
+ *     ├── ForgeRefusedError    -- destroy or apply explicitly refused
+ *     ├── ForgeDriftError      -- live state diverges in a way Forge can't fix
+ *     └── ForgeAwsError        -- wrap of an SDK error with actionable hint
+ *
+ * Why bother: a future CI integration (or `forge plan --json` consumer)
+ * needs to know which exit code to use without parsing message strings.
+ * Refused-by-policy is a different signal from "AWS rate-limited and we
+ * gave up after retries." Hierarchy gives consumers a clean way to
+ * branch on that.
+ */
+export class ForgeError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'ForgeError';
+  }
+}
+
+/**
+ * Raised when Forge refuses to perform a requested action (typical for
+ * tier-1 destroys: VPC, RDS, IAM users, etc.). Caller-actionable message
+ * is in `.message`; this is never the result of an AWS-side failure.
+ */
+export class ForgeRefusedError extends ForgeError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ForgeRefusedError';
+  }
+}
+
+/**
+ * Raised when Forge detects drift it cannot resolve automatically (e.g.,
+ * a config referencing a Lambda target on an EventBridge rule whose live
+ * target is an SQS queue, or a major-version RDS engine bump that needs
+ * manual review). Plan output remains the primary surface; this class is
+ * for cases where apply must stop and ask.
+ */
+export class ForgeDriftError extends ForgeError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ForgeDriftError';
+  }
+}
+
+/**
+ * Wrap of an AWS SDK error with Forge's actionable-hint prefix. Keeps
+ * the original error available via `.cause` so debug output can drill
+ * back to the SDK layer.
+ */
+export class ForgeAwsError extends ForgeError {
+  /** AWS SDK error name (e.g., 'AccessDeniedException'). */
+  awsErrorName: string;
+  constructor(message: string, awsErrorName: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = 'ForgeAwsError';
+    this.awsErrorName = awsErrorName;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Error wrapping
 // ---------------------------------------------------------------------------
 
@@ -148,7 +216,7 @@ export function templatizeName(value: string, ctx: AwsContext): string {
  * Usage:
  *   try { await sdkCall() } catch (err) { throw withContext('[lambda] creating myapp-api', err); }
  */
-export function withContext(prefix: string, err: unknown): Error {
+export function withContext(prefix: string, err: unknown): ForgeAwsError {
   const msg = err instanceof Error ? err.message : String(err);
   const name = (err as { name?: string }).name ?? '';
 
@@ -167,9 +235,8 @@ export function withContext(prefix: string, err: unknown): Error {
     hint = '\n  Hint: AWS credentials are expired or invalid. Re-run `aws sso login --profile <profile>` if SSO, or refresh static credentials in ~/.aws/credentials.';
   }
 
-  const wrapped = new Error(`${prefix}: ${msg}${hint}`);
+  const wrapped = new ForgeAwsError(`${prefix}: ${msg}${hint}`, name, err);
   if (err instanceof Error && err.stack) wrapped.stack = err.stack;
-  (wrapped as { name?: string }).name = name || 'ForgeError';
   return wrapped;
 }
 

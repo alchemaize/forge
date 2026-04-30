@@ -26,9 +26,8 @@ import {
 } from '@aws-sdk/client-ecr';
 import type { AwsContext } from '../aws.js';
 import type { EcrRepoConfig } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface EcrState {
   repoName: string;
   repoUri: string;
@@ -244,7 +243,7 @@ export async function applyEcr(
 // ---------------------------------------------------------------------------
 
 export async function destroyEcr(_ctx: AwsContext, name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy ECR repository '${name}'. Running ECS / Lambda / App Runner\n` +
     'workloads referencing the image break immediately. Empty + delete via AWS Console.'
   );

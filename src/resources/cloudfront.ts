@@ -17,9 +17,8 @@ import {
 } from '@aws-sdk/client-cloudfront';
 import type { AwsContext } from '../aws.js';
 import type { CloudFrontDistributionConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface CloudFrontState {
   distributionId: string;
   domainName: string;
@@ -270,7 +269,7 @@ export async function applyCloudFront(
 }
 
 export async function destroyCloudFront(_ctx: AwsContext, name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy CloudFront distribution '${name}' automatically.\n` +
     'Distributions take 10-15 minutes to disable, then 10-15 minutes to delete,\n' +
     'and breaking the wrong one takes a public site offline. Disable the\n' +

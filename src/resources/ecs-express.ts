@@ -17,9 +17,8 @@ import {
 } from '@aws-sdk/client-ecs';
 import type { AwsContext } from '../aws.js';
 import type { EcsExpressConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // Back-compat ECR re-exports. New code should import from './ecr.js'.
 export {
   describeEcr,
@@ -133,7 +132,7 @@ export async function applyEcsExpress(
 }
 
 export async function destroyEcsExpress(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy ECS services. Use AWS Console or CLI; ensure target group\n' +
     'and load balancer are detached or destroyed cleanly first.'
   );

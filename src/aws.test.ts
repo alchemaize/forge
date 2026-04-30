@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lambdaName, toLambdaArn, canonicalize, templatizeName, withContext } from './aws.js';
+import {
+  lambdaName,
+  toLambdaArn,
+  canonicalize,
+  templatizeName,
+  withContext,
+  ForgeError,
+  ForgeRefusedError,
+  ForgeDriftError,
+  ForgeAwsError,
+} from './aws.js';
 import { fromIni } from '@aws-sdk/credential-providers';
 
 const ctx = {
@@ -223,4 +233,41 @@ test('withContext: passes through unhinted errors with prefix only', () => {
 test('withContext: handles non-Error values', () => {
   const wrapped = withContext('[apply] foo', 'a string thrown directly');
   assert.equal(wrapped.message, '[apply] foo: a string thrown directly');
+});
+
+// ---------------------------------------------------------------------------
+// Error class hierarchy
+// ---------------------------------------------------------------------------
+
+test('ForgeError hierarchy: all subclasses are instanceof ForgeError', () => {
+  const refused = new ForgeRefusedError('refused');
+  const drift = new ForgeDriftError('drift');
+  const aws = new ForgeAwsError('aws', 'AccessDeniedException');
+  assert.ok(refused instanceof ForgeError);
+  assert.ok(drift instanceof ForgeError);
+  assert.ok(aws instanceof ForgeError);
+});
+
+test('ForgeError hierarchy: subclasses preserve their distinct name', () => {
+  assert.equal(new ForgeError('x').name, 'ForgeError');
+  assert.equal(new ForgeRefusedError('x').name, 'ForgeRefusedError');
+  assert.equal(new ForgeDriftError('x').name, 'ForgeDriftError');
+  assert.equal(new ForgeAwsError('x', 'AccessDeniedException').name, 'ForgeAwsError');
+});
+
+test('ForgeAwsError: preserves the AWS error name and original cause', () => {
+  const original = new Error('AWS exploded');
+  (original as { name?: string }).name = 'ThrottlingException';
+  const wrapped = new ForgeAwsError('forge wrapped: AWS exploded', 'ThrottlingException', original);
+  assert.equal(wrapped.awsErrorName, 'ThrottlingException');
+  assert.strictEqual((wrapped as { cause?: unknown }).cause, original);
+});
+
+test('withContext returns a ForgeAwsError', () => {
+  const original = new Error('access denied');
+  (original as { name?: string }).name = 'AccessDeniedException';
+  const wrapped = withContext('[lambda]', original);
+  assert.ok(wrapped instanceof ForgeAwsError);
+  assert.ok(wrapped instanceof ForgeError);
+  assert.equal(wrapped.awsErrorName, 'AccessDeniedException');
 });

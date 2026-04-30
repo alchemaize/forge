@@ -27,9 +27,8 @@ import {
 } from '@aws-sdk/client-kms';
 import type { AwsContext } from '../aws.js';
 import type { KmsKeyConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface KmsState {
   alias: string;
   keyId: string;
@@ -215,7 +214,7 @@ export async function applyKms(
 // ---------------------------------------------------------------------------
 
 export async function destroyKms(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy KMS keys. KMS deletion is irreversible (7-30 day pending\n' +
     'window then permanent). Anything encrypted with the key becomes unrecoverable.\n' +
     'To delete a key, use the AWS Console manually after confirming nothing depends on it.'

@@ -1,11 +1,27 @@
 /**
  * Pinpoint (mobile push, analytics) resource module.
  *
- * Minimal management: lookup by name, create if missing. Forge tracks the AppId
- * so other resources (Lambda env vars referencing PINPOINT_APP_ID) can be wired up.
+ * Adoption-focused: looks up Pinpoint apps by name and tracks their AppId
+ * so Lambda env vars referencing PINPOINT_APP_ID can be wired up. Creates
+ * a new app when one isn't found.
  *
- * Doesn't manage channels (APNS/GCM credentials, SMS sender IDs) — those involve
- * external secrets/certificates and are better handled out-of-band via Console.
+ * Out of scope (manage via AWS Console):
+ *   - APNS / GCM credentials (involve P12 certs and signing keys that
+ *     don't belong in IaC config)
+ *   - SMS sender IDs (per-country regulatory approval)
+ *   - Campaigns, journeys, segments (an analytics-side concern that
+ *     evolves faster than declarative config can keep up with)
+ *
+ * Heads up: AWS announced Pinpoint end of support for 2026-10-30.
+ * Push / SMS / voice / OTP / phone-validation surfaces survive under
+ * "AWS End User Messaging" with a different SDK; engagement features
+ * (campaigns, journeys, analytics) move to Amazon Connect Outbound.
+ * If you're starting a new mobile project, prefer End User Messaging
+ * directly. Forge's renew-app uses Pinpoint for push notifications and
+ * will need a migration before the cutoff.
+ *
+ * SAFETY: Compute-tier — destroy refused. Endpoints + segments +
+ * analytics history are irreversible.
  */
 
 import {
@@ -15,9 +31,8 @@ import {
 } from '@aws-sdk/client-pinpoint';
 import type { AwsContext } from '../aws.js';
 import type { PinpointAppConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface PinpointState {
   appId: string;
   name: string;
@@ -105,7 +120,7 @@ export async function applyPinpoint(
 }
 
 export async function destroyPinpoint(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Pinpoint apps. Endpoints, segments, and analytics history are irreversible.\n' +
     'Pinpoint is also being discontinued by AWS on 2026-10-30 (push/SMS/voice survive under End User Messaging),\n' +
     'so manual cleanup via Console is the right path.'

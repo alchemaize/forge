@@ -18,9 +18,8 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import type { AwsContext } from '../aws.js';
 import type { DynamoTableConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface DynamoTableState {
   tableName: string;
   tableArn: string;
@@ -298,7 +297,7 @@ export async function destroyDynamoTable(
   confirmDataLoss: boolean
 ): Promise<void> {
   if (!confirmDataLoss) {
-    throw new Error(
+    throw new ForgeRefusedError(
       `forge refuses to destroy DynamoDB table '${tableName}' without --confirm-data-loss flag.\n` +
       'This is a data-tier resource. Deletion is irreversible.'
     );

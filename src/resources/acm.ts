@@ -35,9 +35,8 @@ import {
 } from '@aws-sdk/client-route-53';
 import type { AwsContext } from '../aws.js';
 import type { AcmCertificateConfig } from '../config.js';
-import { getClient, withContext } from '../aws.js';
+import { getClient, withContext, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface AcmCertificateState {
   certificateArn: string;
   domainName: string;
@@ -271,7 +270,7 @@ export async function applyAcm(
 // ---------------------------------------------------------------------------
 
 export async function destroyAcm(_ctx: AwsContext, name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy ACM certificate '${name}'. CloudFront / ALB /\n` +
     'API Gateway resources reference cert ARNs and break immediately if the\n' +
     'cert is deleted. Disassociate from every consumer, wait for propagation,\n' +

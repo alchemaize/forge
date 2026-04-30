@@ -15,9 +15,8 @@ import {
 } from '@aws-sdk/client-elasticache';
 import type { AwsContext } from '../aws.js';
 import type { ElastiCacheConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface ElastiCacheState {
   replicationGroupId: string;
   primaryEndpoint: string;
@@ -160,7 +159,7 @@ export async function applyElastiCache(
  * Destroy — REFUSED for data-tier resources.
  */
 export async function destroyElastiCache(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy ElastiCache resources. Data loss is irreversible.\n' +
     'To delete a Redis replication group, use the AWS Console or CLI manually.'
   );

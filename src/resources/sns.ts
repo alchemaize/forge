@@ -30,9 +30,8 @@ import {
 } from '@aws-sdk/client-sns';
 import type { AwsContext } from '../aws.js';
 import type { SnsTopicConfig, SnsSubscriptionConfig } from '../config.js';
-import { getClient, withContext } from '../aws.js';
+import { getClient, withContext, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface SnsTopicState {
   topicArn: string;
   name: string;
@@ -246,7 +245,7 @@ export async function applySns(
 // ---------------------------------------------------------------------------
 
 export async function destroySns(name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy SNS topic '${name}'. Subscribers (email, Lambda, SQS) would silently lose delivery.\n` +
     'Confirm no subscribers depend on the topic, then DeleteTopic via AWS Console or CLI manually.'
   );

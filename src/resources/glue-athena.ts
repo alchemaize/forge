@@ -32,9 +32,8 @@ import type {
   GlueDatabaseConfig,
   AthenaWorkgroupConfig,
 } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // ===========================================================================
 // GLUE DATABASE
 // ===========================================================================
@@ -151,7 +150,7 @@ export async function applyGlueDatabase(
 }
 
 export async function destroyGlueDatabase(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Glue databases. Tables / queries reference\n' +
     'the database name and break immediately on delete.'
   );
@@ -290,7 +289,7 @@ export async function applyAthenaWorkgroup(
 }
 
 export async function destroyAthenaWorkgroup(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Athena workgroups. Saved queries and result\n' +
     'history vanish; dashboards/scheduled queries break.'
   );

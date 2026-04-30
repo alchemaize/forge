@@ -44,9 +44,8 @@ import type {
   IamGroupConfig,
   IamInstanceProfileConfig,
 } from '../config.js';
-import { getClient, withContext } from '../aws.js';
+import { getClient, withContext, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // ===========================================================================
 // USERS
 // ===========================================================================
@@ -176,7 +175,7 @@ export async function applyIamUser(
 export async function destroyIamUser(_ctx: AwsContext, name: string): Promise<never> {
   // Keep DeleteUserCommand reachable for future explicit-cleanup flow.
   void DeleteUserCommand;
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy IAM user '${name}'. Deletion is irreversible\n` +
     'and could lock out a real human. Detach policies, remove from groups,\n' +
     'rotate credentials, then DeleteUser via AWS Console or CLI.'
@@ -272,7 +271,7 @@ export async function applyIamGroup(
 
 export async function destroyIamGroup(): Promise<never> {
   void DeleteGroupCommand;
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy IAM groups. Members lose policy attachments\n' +
     'silently. Remove members and detach policies first, then DeleteGroup.'
   );
@@ -378,7 +377,7 @@ export async function applyInstanceProfile(
 
 export async function destroyInstanceProfile(): Promise<never> {
   void DeleteInstanceProfileCommand;
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy IAM instance profiles. EC2 launches that\n' +
     'reference the profile by name fail; ASG instance refresh stops.\n' +
     'Detach from launch templates first, then DeleteInstanceProfile.'

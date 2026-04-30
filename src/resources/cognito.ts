@@ -24,9 +24,8 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import type { AwsContext } from '../aws.js';
 import type { CognitoConfig } from '../config.js';
-import { getClient, lambdaName, toLambdaArn } from '../aws.js';
+import { getClient, lambdaName, toLambdaArn, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface CognitoState {
   userPoolId: string;
   userPoolArn: string;
@@ -543,7 +542,7 @@ export async function applyCognitoTriggers(
 }
 
 export async function destroyCognito(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Cognito user pools. User data is irreversible.\n' +
     'To delete a user pool, use the AWS Console or CLI manually.\n' +
     'Ensure no users depend on it first.'

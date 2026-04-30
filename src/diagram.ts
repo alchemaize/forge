@@ -11,9 +11,16 @@
  * - Landscape and portrait orientation support
  * - Large readable fonts (12pt nodes, 16pt clusters, 20pt title)
  *
- * Prerequisites:
+ * Prerequisites (only required when generateDiagram() runs, not at import time):
  *   pip3 install diagrams
  *   brew install graphviz
+ *
+ * Lazy-load: static imports are limited to Node built-ins plus a type-only
+ * config import. The CLI further dynamic-imports this module on `forge diagram`
+ * (see cli.ts), so `forge plan` / `forge apply` users never pay the import
+ * cost. The Python `diagrams` library is shelled out to via execSync inside
+ * generateDiagram(); if it's not installed, the call fails with a clear
+ * error rather than blocking unrelated commands.
  */
 
 import { writeFileSync, unlinkSync } from 'fs';

@@ -28,9 +28,8 @@ import {
 import { readFileSync, existsSync } from 'fs';
 import type { AwsContext } from '../aws.js';
 import type { LambdaLayerConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface LayerState {
   layerName: string;
   layerArn: string;
@@ -167,7 +166,7 @@ export async function applyLayer(
 }
 
 export async function destroyLayer(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Lambda layers. Live functions referencing a\n' +
     'specific layer version break on the next cold start if that version\n' +
     'is deleted. To remove a layer, first detach it from every function\n' +

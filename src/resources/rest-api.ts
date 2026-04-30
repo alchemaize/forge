@@ -44,9 +44,8 @@ import {
 } from '@aws-sdk/client-lambda';
 import type { AwsContext } from '../aws.js';
 import type { RestApiConfig } from '../config.js';
-import { getClient, withContext, toLambdaArn } from '../aws.js';
+import { getClient, withContext, toLambdaArn, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface RestApiState {
   restApiId: string;
   name: string;
@@ -301,7 +300,7 @@ export async function applyRestApi(
 // ---------------------------------------------------------------------------
 
 export async function destroyRestApi(_ctx: AwsContext, name: string): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     `forge refuses to destroy REST API '${name}'. Clients break the\n` +
     'moment the API ID becomes invalid. Update DNS to point elsewhere first,\n' +
     'wait for caches to expire, then DeleteRestApi via AWS Console or CLI.'

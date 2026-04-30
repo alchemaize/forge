@@ -26,9 +26,8 @@ import {
 } from '@aws-sdk/client-opensearch';
 import type { AwsContext } from '../aws.js';
 import type { OpenSearchDomainConfig } from '../config.js';
-import { getClient, withContext } from '../aws.js';
+import { getClient, withContext, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 export interface OpenSearchDomainState {
   domainName: string;
   arn: string;
@@ -219,7 +218,7 @@ export async function applyOpenSearchDomain(
 // ---------------------------------------------------------------------------
 
 export async function destroyOpenSearchDomain(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy OpenSearch domains. The index data is gone\n' +
     'permanently and clients break immediately. Snapshot the indices to S3,\n' +
     'verify the snapshot, then DeleteDomain via AWS Console.'

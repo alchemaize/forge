@@ -39,9 +39,8 @@ import type {
   BedrockProvisionedThroughputConfig,
   BedrockGuardrailConfig,
 } from '../config.js';
-import { getClient, withContext, canonicalize } from '../aws.js';
+import { getClient, withContext, canonicalize, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
-
 // ===========================================================================
 // PROVISIONED THROUGHPUT
 // ===========================================================================
@@ -161,7 +160,7 @@ export async function applyProvisionedThroughput(
 }
 
 export async function destroyProvisionedThroughput(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Bedrock provisioned throughputs. Committed\n' +
     'capacity is billed for the full term regardless. Delete via Console\n' +
     'after confirming the commitment date.'
@@ -338,7 +337,7 @@ export async function applyGuardrail(
 }
 
 export async function destroyGuardrail(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy Bedrock guardrails. Production AI features\n' +
     'rely on guardrails for safe behavior; deletion silently exposes\n' +
     'unfiltered model output. Detach from agents/applications first.'

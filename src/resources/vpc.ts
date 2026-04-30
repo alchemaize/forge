@@ -32,9 +32,8 @@ import {
 } from '@aws-sdk/client-ec2';
 import type { AwsContext } from '../aws.js';
 import type { VpcConfig } from '../config.js';
-import { getClient } from '../aws.js';
+import { getClient, ForgeRefusedError } from '../aws.js';
 import { addChange, type Plan, type ResourceChange } from '../diff.js';
-
 // Lazy-import RDS client for DB subnet group operations
 async function getRdsClient(ctx: AwsContext) {
   const { RDSClient } = await import('@aws-sdk/client-rds');
@@ -570,7 +569,7 @@ export async function applyVpc(
  * Destroy — REFUSED for VPC. Too dangerous.
  */
 export async function destroyVpc(): Promise<never> {
-  throw new Error(
+  throw new ForgeRefusedError(
     'forge refuses to destroy VPC resources. VPCs may be shared across multiple apps.\n' +
     'To delete a VPC, use the AWS Console or CLI manually after verifying no other resources depend on it.\n' +
     'Check: aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=<VPC_ID>'
