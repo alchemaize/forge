@@ -38,7 +38,7 @@ import type { AwsContext } from '../aws.js';
 import type { LambdaFunctionConfig, InlinePolicyStatement } from '../config.js';
 import { isNamedInlinePolicy } from '../config.js';
 import type { VpcState } from './vpc.js';
-import { getClient, canonicalize } from '../aws.js';
+import { getClient, canonicalize, awaitIamPropagation } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface LambdaState {
@@ -533,10 +533,7 @@ async function ensureExecutionRole(
     }
   }
 
-  // Wait for propagation
-  console.log('[lambda] Waiting for IAM role propagation (10s)...');
-  await new Promise(r => setTimeout(r, 10000));
-
+  await awaitIamPropagation(`role ${roleName}`);
   return roleArn;
 }
 

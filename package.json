@@ -17,9 +17,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-acm": "^3.1039.0",
     "@aws-sdk/client-apigatewayv2": "^3.700.0",
     "@aws-sdk/client-cloudformation": "^3.1037.0",
     "@aws-sdk/client-cloudfront": "^3.1037.0",
+    "@aws-sdk/client-cloudwatch": "^3.1039.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1039.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
     "@aws-sdk/client-dynamodb": "^3.700.0",
     "@aws-sdk/client-ec2": "^3.700.0",
@@ -31,6 +34,7 @@
     "@aws-sdk/client-kms": "^3.1038.0",
     "@aws-sdk/client-lambda": "^3.700.0",
     "@aws-sdk/client-rds": "^3.700.0",
+    "@aws-sdk/client-route-53": "^3.1039.0",
     "@aws-sdk/client-s3": "^3.700.0",
     "@aws-sdk/client-secrets-manager": "^3.700.0",
     "@aws-sdk/client-sfn": "^3.1037.0",

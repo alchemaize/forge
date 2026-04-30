@@ -34,6 +34,10 @@ import * as iamManagedPolicy from './resources/iam-managed-policy.js';
 import * as securityGroup from './resources/security-group.js';
 import * as lambdaLayer from './resources/lambda-layer.js';
 import * as eventBus from './resources/event-bus.js';
+import * as sns from './resources/sns.js';
+import * as cloudwatch from './resources/cloudwatch.js';
+import * as route53 from './resources/route53.js';
+import * as acm from './resources/acm.js';
 
 // ---------------------------------------------------------------------------
 // Plan
@@ -100,6 +104,32 @@ export async function plan(config: ForgeConfig): Promise<Plan> {
   // SQS
   for (const sqsConfig of config.sqs ?? []) {
     await sqs.planSqs(ctx, sqsConfig, config.app, p);
+  }
+
+  // SNS
+  for (const snsConfig of config.sns ?? []) {
+    await sns.planSns(ctx, snsConfig, config.app, p);
+  }
+
+  // CloudWatch log groups (data-tier; planned with the data block).
+  for (const lgConfig of config.logGroups ?? []) {
+    await cloudwatch.planLogGroup(ctx, lgConfig, config.app, p);
+  }
+
+  // Route 53 hosted zones (and records).
+  for (const zoneConfig of config.hostedZones ?? []) {
+    await route53.planHostedZone(ctx, zoneConfig, config.app, p);
+  }
+
+  // ACM certificates. Plan after hosted zones because ACM depends on
+  // them for DNS validation auto-write.
+  for (const certConfig of config.certificates ?? []) {
+    await acm.planAcm(ctx, certConfig, config.app, p);
+  }
+
+  // CloudWatch alarms. Plan after SNS so alarmTopicName references resolve.
+  for (const alarmConfig of config.alarms ?? []) {
+    await cloudwatch.planAlarm(ctx, alarmConfig, config.app, p);
   }
 
   // CloudFront
@@ -344,6 +374,41 @@ export async function apply(config: ForgeConfig): Promise<void> {
   if (config.sqs?.length) console.log(`▸ Phase: SQS (${config.sqs.length})`);
   for (const sqsConfig of config.sqs ?? []) {
     await sqs.applySqs(ctx, sqsConfig, config.app);
+  }
+
+  // Phase 12: Route 53. Hosted zones first so subsequent ACM phases can
+  // resolve validationZoneName.
+  if (config.hostedZones?.length) console.log(`▸ Phase: Route 53 (${config.hostedZones.length} zone${config.hostedZones.length > 1 ? 's' : ''})`);
+  for (const zoneConfig of config.hostedZones ?? []) {
+    await route53.applyHostedZone(ctx, zoneConfig, config.app);
+  }
+
+  // Phase 13: ACM certificates. After Route 53 so DNS validation records
+  // can be auto-written to a hosted zone declared in the same config.
+  if (config.certificates?.length) console.log(`▸ Phase: ACM (${config.certificates.length})`);
+  for (const certConfig of config.certificates ?? []) {
+    await acm.applyAcm(ctx, certConfig, config.app);
+  }
+
+  // Phase 14: SNS topics. After ACM/Route 53 because alarms in the next
+  // phase reference SNS topics.
+  if (config.sns?.length) console.log(`▸ Phase: SNS (${config.sns.length})`);
+  for (const snsConfig of config.sns ?? []) {
+    await sns.applySns(ctx, snsConfig, config.app);
+  }
+
+  // Phase 15: CloudWatch log groups. Data-tier; could go earlier but
+  // ordering doesn't matter relative to other resources.
+  if (config.logGroups?.length) console.log(`▸ Phase: LogGroups (${config.logGroups.length})`);
+  for (const lgConfig of config.logGroups ?? []) {
+    await cloudwatch.applyLogGroup(ctx, lgConfig, config.app);
+  }
+
+  // Phase 16: CloudWatch alarms. After SNS so alarmTopicName references
+  // resolve to live topics.
+  if (config.alarms?.length) console.log(`▸ Phase: Alarms (${config.alarms.length})`);
+  for (const alarmConfig of config.alarms ?? []) {
+    await cloudwatch.applyAlarm(ctx, alarmConfig, config.app);
   }
 
   // Summary
@@ -596,6 +661,56 @@ export async function status(config: ForgeConfig): Promise<void> {
       console.log(`  EventBus: ${ebConfig.name}`);
     } else {
       console.log(`  EventBus: ${ebConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // SNS
+  for (const snsConfig of config.sns ?? []) {
+    const state = await sns.describeSns(ctx, snsConfig);
+    if (state) {
+      console.log(`  SNS: ${state.name} (${state.subscriptionCount} subscription${state.subscriptionCount === 1 ? '' : 's'})`);
+    } else {
+      console.log(`  SNS: ${snsConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // CloudWatch log groups
+  for (const lgConfig of config.logGroups ?? []) {
+    const state = await cloudwatch.describeLogGroup(ctx, lgConfig);
+    if (state) {
+      console.log(`  LogGroup: ${state.name} (retention=${state.retentionDays === 0 ? 'never' : state.retentionDays + 'd'})`);
+    } else {
+      console.log(`  LogGroup: ${lgConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // CloudWatch alarms
+  for (const alarmConfig of config.alarms ?? []) {
+    const state = await cloudwatch.describeAlarm(ctx, alarmConfig);
+    if (state) {
+      console.log(`  Alarm: ${state.name} (state=${state.state}, threshold ${state.comparisonOperator} ${state.threshold})`);
+    } else {
+      console.log(`  Alarm: ${alarmConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Route 53 hosted zones
+  for (const zoneConfig of config.hostedZones ?? []) {
+    const state = await route53.describeHostedZone(ctx, zoneConfig);
+    if (state) {
+      console.log(`  Zone: ${state.name} (${state.zoneId}, ${state.recordCount} records${state.privateZone ? ', private' : ''})`);
+    } else {
+      console.log(`  Zone: ${zoneConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // ACM certificates
+  for (const certConfig of config.certificates ?? []) {
+    const state = await acm.describeAcm(ctx, certConfig);
+    if (state) {
+      console.log(`  Certificate: ${state.domainName} (${state.status})`);
+    } else {
+      console.log(`  Certificate: ${certConfig.domainName} — NOT FOUND`);
     }
   }
 

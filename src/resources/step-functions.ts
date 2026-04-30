@@ -21,7 +21,7 @@ import {
 } from '@aws-sdk/client-iam';
 import type { AwsContext } from '../aws.js';
 import type { StepFunctionConfig } from '../config.js';
-import { getClient, canonicalize } from '../aws.js';
+import { getClient, canonicalize, awaitIamPropagation } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface StepFunctionState {
@@ -179,8 +179,7 @@ async function ensureStateMachineRole(
     }),
   }));
 
-  // Wait for IAM propagation — Step Functions checks role existence on create.
-  await new Promise(r => setTimeout(r, 10000));
+  await awaitIamPropagation(`state-machine role`);
   return roleArn;
 }
 

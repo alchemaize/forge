@@ -94,6 +94,23 @@ export function resolveTemplate(template: string, ctx: AwsContext, app: string):
 }
 
 /**
+ * IAM is eventually consistent. After CreateRole / CreateInstanceProfile /
+ * AttachRolePolicy / PutRolePolicy, the principal isn't always immediately
+ * visible to other services (Lambda's CreateFunction in particular returns
+ * `InvalidParameterValueException: The role defined for the function cannot
+ * be assumed by Lambda` if used too quickly). The standard mitigation is a
+ * 10-second wait.
+ *
+ * Earlier this magic number was repeated in 4 modules (lambda.ts, rds.ts,
+ * step-functions.ts, vpc.ts). One helper, one place to tune if AWS ever
+ * fixes the underlying race.
+ */
+export function awaitIamPropagation(reason?: string, ms = 10000): Promise<void> {
+  if (reason) console.log(`[iam] Waiting ${(ms / 1000).toFixed(0)}s for propagation (${reason})...`);
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
  * Inverse of resolveTemplate: replace account ID and region in a value
  * (typically a captured AWS resource name) with `{account}` / `{region}`
  * placeholders, so generated configs are portable across accounts.

@@ -192,6 +192,11 @@ Examples:
         elasticache: async () => (await import('./resources/elasticache.js')).destroyElastiCache(),
         ecr: async () => (await import('./resources/ecs-express.js')).destroyEcr(ctx, resourceName),
         'ecs-express': async () => (await import('./resources/ecs-express.js')).destroyEcsExpress(),
+        sns: async () => (await import('./resources/sns.js')).destroySns(resourceName),
+        'log-group': async () => (await import('./resources/cloudwatch.js')).destroyLogGroup(ctx, resourceName, confirmDataLoss),
+        alarm: async () => (await import('./resources/cloudwatch.js')).destroyAlarm(ctx, resourceName),
+        'route53-zone': async () => (await import('./resources/route53.js')).destroyHostedZone(),
+        'acm-certificate': async () => (await import('./resources/acm.js')).destroyAcm(ctx, resourceName),
       };
 
       const handler = destroyRegistry[resourceType];

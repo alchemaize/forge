@@ -449,11 +449,39 @@ export interface SsmParameterConfig {
 // SNS
 // ---------------------------------------------------------------------------
 
+export interface SnsSubscriptionConfig {
+  /** Protocol (e.g., 'email', 'sqs', 'lambda', 'https'). */
+  protocol: 'email' | 'email-json' | 'sms' | 'sqs' | 'lambda' | 'http' | 'https';
+  /**
+   * Endpoint. The shape depends on protocol:
+   *   email     → 'ops@example.com'
+   *   sqs       → arn:aws:sqs:... or a bare queue name resolved against
+   *               the same forge config (Forge will look it up).
+   *   lambda    → arn:aws:lambda:... or a bare function name in the
+   *               same config.
+   *   http(s)   → full URL.
+   */
+  endpoint: string;
+  /** Filter policy applied at subscription level. */
+  filterPolicy?: Record<string, unknown>;
+  /** Raw message delivery (skips SNS envelope; useful for SQS / Lambda). */
+  rawMessageDelivery?: boolean;
+}
+
 export interface SnsTopicConfig {
   name: string;
+  /** Mobile push platform (APNS / GCM). */
   platform?: 'APNS' | 'GCM';
-  /** Display name for email subscriptions */
+  /** Display name shown to email subscribers. */
   displayName?: string;
+  /** FIFO topic (default: false). FIFO topic names must end in `.fifo`. */
+  fifo?: boolean;
+  /** KMS key ARN/alias for SSE-KMS encryption (default: none). */
+  kmsKeyId?: string;
+  /** Subscriptions attached to the topic. Forge ensures each one exists
+   * and adds missing ones; existing subscriptions outside the config are
+   * left alone (adoption-safe). */
+  subscriptions?: SnsSubscriptionConfig[];
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +578,106 @@ export interface StepFunctionConfig {
   definition?: Record<string, unknown>;
   /** DLQ for failed executions (SQS queue name) */
   dlqName?: string;
+}
+
+// ---------------------------------------------------------------------------
+// CloudWatch Log Groups
+// ---------------------------------------------------------------------------
+
+export interface CloudWatchLogGroupConfig {
+  /**
+   * Log group name. Lambda function logs go to `/aws/lambda/<function-name>`
+   * by convention; declaring the log group here lets Forge own retention
+   * policy and KMS encryption upfront instead of letting AWS default to
+   * "Never expire" on first invocation.
+   */
+  name: string;
+  /**
+   * Retention in days. Default: 30. AWS allowed values: 1, 3, 5, 7, 14,
+   * 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192,
+   * 2557, 2922, 3288, 3653. `Infinity` (CloudWatch's default) is not
+   * recommended for cost reasons.
+   */
+  retentionDays?: number;
+  /** KMS key ARN for log group encryption (default: AWS-managed). */
+  kmsKeyArn?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Route 53
+// ---------------------------------------------------------------------------
+
+export interface Route53RecordConfig {
+  /** Record name. Trailing dot optional; Forge normalizes. */
+  name: string;
+  /** Record type. */
+  type: 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'MX' | 'NS' | 'SRV' | 'CAA';
+  /** TTL in seconds (default: 300). Required unless using `alias`. */
+  ttl?: number;
+  /** Resource records (RDATA). For TXT, individual values are quoted
+   * automatically. */
+  values?: string[];
+  /** Alias target. Used for ALB / CloudFront / S3 website / API Gateway
+   * targets. When set, ttl is ignored. */
+  alias?: {
+    /** DNS name of the target (e.g., d123.cloudfront.net or alb-foo-123.region.elb.amazonaws.com). */
+    dnsName: string;
+    /** Hosted zone ID of the alias target. CloudFront uses Z2FDTNDATAQYW2;
+     * S3 website endpoints have per-region zone IDs; ALBs publish theirs. */
+    hostedZoneId: string;
+    /** Whether to evaluate target health (default: false). */
+    evaluateTargetHealth?: boolean;
+  };
+}
+
+export interface Route53HostedZoneConfig {
+  /** Domain name (e.g., 'example.com'). Trailing dot optional. */
+  name: string;
+  /** Comment shown in the Route 53 console. */
+  comment?: string;
+  /**
+   * Private hosted zone. When true, must specify `vpcs` to associate.
+   * Forge defaults to public.
+   */
+  privateZone?: boolean;
+  /** VPC IDs to associate (private zones only). */
+  vpcs?: Array<{ vpcId: string; vpcRegion: string }>;
+  /** Records in this zone. Adoption-safe: extra records in AWS but not in
+   * config are left alone. */
+  records?: Route53RecordConfig[];
+}
+
+// ---------------------------------------------------------------------------
+// ACM (Certificate Manager)
+// ---------------------------------------------------------------------------
+
+export interface AcmCertificateConfig {
+  /**
+   * Logical name used in plan/status output. Forge looks up the actual
+   * certificate by domain name.
+   */
+  name: string;
+  /** Primary domain name. Wildcards (`*.example.com`) supported. */
+  domainName: string;
+  /** Subject Alternative Names (SANs). */
+  subjectAlternativeNames?: string[];
+  /**
+   * Validation method. 'DNS' is recommended (auto-renews); 'EMAIL'
+   * requires manual click-through every 13 months.
+   */
+  validation?: 'DNS' | 'EMAIL';
+  /**
+   * Hosted zone name to auto-create DNS validation records in. When set
+   * AND validation is 'DNS', Forge writes the _acmchallenge CNAME records
+   * into this zone automatically. When unset, the user is responsible for
+   * adding the DNS records (Forge will print them).
+   */
+  validationZoneName?: string;
+  /**
+   * Certificate transparency logging. Default: ENABLED. Disable only
+   * when AWS recommends it (rare).
+   */
+  transparencyLogging?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +925,12 @@ export interface ForgeConfig {
   securityGroups?: SecurityGroupConfig[];
   lambdaLayers?: LambdaLayerConfig[];
   eventBuses?: EventBusConfig[];
+  /** CloudWatch log groups with retention. */
+  logGroups?: CloudWatchLogGroupConfig[];
+  /** Route 53 hosted zones (and their records). */
+  hostedZones?: Route53HostedZoneConfig[];
+  /** ACM certificates (DNS validation pairs with hostedZones). */
+  certificates?: AcmCertificateConfig[];
 }
 
 /**

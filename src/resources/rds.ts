@@ -50,7 +50,7 @@ import { randomBytes } from 'crypto';
 import type { AwsContext } from '../aws.js';
 import type { RdsConfig } from '../config.js';
 import type { VpcState } from './vpc.js';
-import { getClient } from '../aws.js';
+import { getClient, awaitIamPropagation } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
 export interface RdsState {
@@ -434,10 +434,7 @@ async function ensureProxyRole(
     }),
   }));
 
-  // Wait for propagation
-  console.log('[rds] Waiting for IAM role propagation (10s)...');
-  await new Promise(r => setTimeout(r, 10000));
-
+  await awaitIamPropagation(`rds-monitoring role`);
   return createRes.Role!.Arn!;
 }
 
