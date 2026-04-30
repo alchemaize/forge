@@ -1,142 +1,34 @@
 /**
- * ECS Express Mode + ECR resource module.
+ * ECS Express Mode resource module.
  *
- * Manages ECR repositories and ECS Express Mode services.
- * Deploy = Docker build → ECR push → update-express-gateway-service.
+ * The "Express Mode" portion of this file is currently a no-op stub —
+ * `aws ecs create-express-gateway-service` isn't a real CLI command,
+ * so applyEcsExpress refuses with a clear error. The full-ECS module
+ * (CreateService + RegisterTaskDefinition + ALB) lives in ecs.ts.
+ *
+ * ECR is now in src/resources/ecr.ts; this file re-exports those
+ * symbols for back-compat with existing engine + cli imports.
  */
 
-import {
-  ECRClient,
-  DescribeRepositoriesCommand,
-  CreateRepositoryCommand,
-  PutLifecyclePolicyCommand,
-} from '@aws-sdk/client-ecr';
 import {
   ECSClient,
   ListServicesCommand,
   DescribeServicesCommand,
 } from '@aws-sdk/client-ecs';
 import type { AwsContext } from '../aws.js';
-import type { EcrRepoConfig, EcsExpressConfig } from '../config.js';
+import type { EcsExpressConfig } from '../config.js';
 import { getClient } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
 
-// ---------------------------------------------------------------------------
-// ECR
-// ---------------------------------------------------------------------------
-
-export interface EcrState {
-  repoName: string;
-  repoUri: string;
-  repoArn: string;
-}
-
-export async function describeEcr(
-  ctx: AwsContext,
-  repoName: string
-): Promise<EcrState | null> {
-  const ecr = getClient(ctx, ECRClient);
-
-  try {
-    const res = await ecr.send(new DescribeRepositoriesCommand({
-      repositoryNames: [repoName],
-    }));
-    const repo = res.repositories?.[0];
-    if (!repo) return null;
-    return {
-      repoName: repo.repositoryName!,
-      repoUri: repo.repositoryUri!,
-      repoArn: repo.repositoryArn!,
-    };
-  } catch (err: any) {
-    if (err.name === 'RepositoryNotFoundException') return null;
-    throw err;
-  }
-}
-
-export async function planEcr(
-  ctx: AwsContext,
-  config: EcrRepoConfig,
-  appName: string,
-  plan: Plan
-): Promise<EcrState | null> {
-  const current = await describeEcr(ctx, config.name);
-
-  if (current) {
-    addChange(plan, {
-      resourceType: 'ecr',
-      resourceId: config.name,
-      changeType: 'unchanged',
-      tier: 'compute',
-      fields: [],
-    });
-    return current;
-  }
-
-  addChange(plan, {
-    resourceType: 'ecr',
-    resourceId: config.name,
-    changeType: 'create',
-    tier: 'compute',
-    fields: [
-      { field: 'lifecycleKeep', current: undefined, desired: config.lifecycleKeep ?? 5 },
-      { field: 'scanOnPush', current: undefined, desired: config.scanOnPush ?? true },
-    ],
-  });
-
-  return null;
-}
-
-export async function applyEcr(
-  ctx: AwsContext,
-  config: EcrRepoConfig,
-  appName: string
-): Promise<EcrState> {
-  const ecr = getClient(ctx, ECRClient);
-  const current = await describeEcr(ctx, config.name);
-
-  if (current) {
-    console.log(`[ecr] Repository exists: ${config.name}`);
-    return current;
-  }
-
-  console.log(`[ecr] Creating repository: ${config.name}`);
-  const res = await ecr.send(new CreateRepositoryCommand({
-    repositoryName: config.name,
-    imageScanningConfiguration: { scanOnPush: config.scanOnPush ?? true },
-    tags: [
-      { Key: 'app', Value: appName },
-      { Key: 'managed-by', Value: 'forge' },
-    ],
-  }));
-
-  // Lifecycle policy
-  const keepCount = config.lifecycleKeep ?? 5;
-  await ecr.send(new PutLifecyclePolicyCommand({
-    repositoryName: config.name,
-    lifecyclePolicyText: JSON.stringify({
-      rules: [{
-        rulePriority: 1,
-        description: `Keep last ${keepCount} images`,
-        selection: {
-          tagStatus: 'any',
-          countType: 'imageCountMoreThan',
-          countNumber: keepCount,
-        },
-        action: { type: 'expire' },
-      }],
-    }),
-  }));
-
-  const repo = res.repository!;
-  console.log(`[ecr] Created: ${repo.repositoryUri}`);
-
-  return {
-    repoName: repo.repositoryName!,
-    repoUri: repo.repositoryUri!,
-    repoArn: repo.repositoryArn!,
-  };
-}
+// Back-compat ECR re-exports. New code should import from './ecr.js'.
+export {
+  describeEcr,
+  planEcr,
+  applyEcr,
+  destroyEcr,
+} from './ecr.js';
+import type { EcrState } from './ecr.js';
+export type { EcrState };
 
 // ---------------------------------------------------------------------------
 // ECS Express Mode
@@ -237,13 +129,6 @@ export async function applyEcsExpress(
     `[ecs-express] ${config.name}: native create is not implemented.\n` +
     `Provision the ECS service via Console / CDK / CLI, then re-run 'forge import' to capture it.\n` +
     `A proper full-ECS module (CreateService + RegisterTaskDefinition + ALB) is on the roadmap.`
-  );
-}
-
-export async function destroyEcr(_ctx: AwsContext, name: string): Promise<never> {
-  throw new Error(
-    `forge refuses to destroy ECR repository '${name}'. Running ECS / Lambda / App Runner\n` +
-    'workloads referencing the image break immediately. Empty + delete via AWS Console.'
   );
 }
 

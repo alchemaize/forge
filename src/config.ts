@@ -465,6 +465,235 @@ export interface SsmParameterConfig {
 }
 
 // ---------------------------------------------------------------------------
+// ALB / NLB
+// ---------------------------------------------------------------------------
+
+export interface AlbTargetGroupConfig {
+  /** Logical name (used for plan output and listener-rule references). */
+  name: string;
+  /** Port the targets listen on (default: 80). */
+  port?: number;
+  /** Protocol (default: HTTP). HTTPS used when ALB terminates TLS at the
+   * target (rare; usually ALB → target uses plain HTTP and TLS terminates
+   * at the listener). */
+  protocol?: 'HTTP' | 'HTTPS';
+  /** Target type. 'ip' is the right choice for Fargate; 'instance' for EC2;
+   * 'lambda' for direct Lambda invocation. */
+  targetType?: 'instance' | 'ip' | 'lambda' | 'alb';
+  /** Health check path (default: '/'). */
+  healthCheckPath?: string;
+  /** Health check status codes (default: '200'). Comma-separated or range
+   * like '200-299'. */
+  healthCheckCodes?: string;
+  /** Deregistration delay in seconds (default: 30 — shorter than AWS's
+   * 300s default to avoid lingering connections during deploys). */
+  deregistrationDelay?: number;
+  /** Stickiness — append a session cookie that pins requests to a target. */
+  stickiness?: { enabled: boolean; durationSeconds?: number };
+}
+
+export interface AlbListenerRuleConfig {
+  /** Priority (1-50000). Lower runs first. */
+  priority: number;
+  /** Path patterns to match (e.g., ['/api/*']). */
+  pathPatterns?: string[];
+  /** Host headers to match (e.g., ['api.example.com']). */
+  hostHeaders?: string[];
+  /** Forward to this target group (by name in this config). */
+  targetGroup: string;
+}
+
+export interface AlbListenerConfig {
+  /** Port (default: 80 for HTTP, 443 for HTTPS). */
+  port?: number;
+  protocol: 'HTTP' | 'HTTPS';
+  /** ACM certificate ARN (HTTPS only). */
+  certificateArn?: string;
+  /** Default action target group (when no rule matches). */
+  defaultTargetGroup: string;
+  /** SSL policy (HTTPS only). Default: ELBSecurityPolicy-TLS13-1-2-2021-06. */
+  sslPolicy?: string;
+  /** Listener rules (path / host based). */
+  rules?: AlbListenerRuleConfig[];
+}
+
+export interface AlbConfig {
+  /** ALB name (max 32 chars, used as AWS-side identifier). */
+  name: string;
+  /** Internet-facing (default: true). Internal ALBs serve VPC-private traffic. */
+  internetFacing?: boolean;
+  /** Subnet IDs. Must be in at least 2 AZs. */
+  subnetIds: string[];
+  /** Security group IDs (must allow inbound on listener ports). */
+  securityGroupIds?: string[];
+  /** Target groups. */
+  targetGroups: AlbTargetGroupConfig[];
+  /** Listeners (HTTP / HTTPS). */
+  listeners: AlbListenerConfig[];
+  /** Idle timeout in seconds (default: 60). */
+  idleTimeout?: number;
+  /** Drop invalid header fields (default: false). */
+  dropInvalidHeaderFields?: boolean;
+  /** HTTP/2 enabled (default: true). */
+  http2?: boolean;
+  /** VPC ID. Inferred from parent vpc.lookup or vpc.create. */
+  vpcId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// WAF v2 (Web ACL)
+// ---------------------------------------------------------------------------
+
+export interface WafRuleConfig {
+  name: string;
+  priority: number;
+  /**
+   * Built-in AWS managed rule group. Examples:
+   *   - 'AWSManagedRulesCommonRuleSet'
+   *   - 'AWSManagedRulesKnownBadInputsRuleSet'
+   *   - 'AWSManagedRulesAmazonIpReputationList'
+   *   - 'AWSManagedRulesAnonymousIpList'
+   *   - 'AWSManagedRulesSQLiRuleSet'
+   * Setting this uses AWS's managed rules.
+   */
+  managedRuleGroup?: string;
+  /**
+   * Custom rate-limit rule. Blocks an IP that exceeds `limit` requests
+   * per 5 minutes. Set this OR managedRuleGroup, not both.
+   */
+  rateLimit?: { limit: number; aggregateKey?: 'IP' | 'FORWARDED_IP' };
+  /** Action when the rule matches. Default: 'block' for rate-limit,
+   * 'count' for managed (so you can monitor before enforcing). */
+  action?: 'allow' | 'block' | 'count';
+  /** Whether CloudWatch metrics + sampled requests are emitted. */
+  visibility?: { cloudWatchMetrics?: boolean; sampledRequests?: boolean };
+}
+
+export interface WafWebAclConfig {
+  name: string;
+  /**
+   * Scope. CloudFront-attached WebACLs MUST be in us-east-1 with
+   * scope='CLOUDFRONT'. ALB / API Gateway / AppSync use scope='REGIONAL'.
+   */
+  scope: 'CLOUDFRONT' | 'REGIONAL';
+  /** Default action when no rule matches (default: 'allow'). */
+  defaultAction?: 'allow' | 'block';
+  rules: WafRuleConfig[];
+  /**
+   * ARNs (or simple resource names) the WebACL should be associated with.
+   * For ALBs this is the LoadBalancer ARN; for CloudFront the distribution
+   * ID. Forge resolves bare names against same-config resources where it
+   * can.
+   */
+  associatedResources?: string[];
+  /** Description shown in the WAF console. */
+  description?: string;
+}
+
+// ---------------------------------------------------------------------------
+// ECS (full)
+// ---------------------------------------------------------------------------
+
+export interface EcsContainerConfig {
+  /** Container name within the task definition. */
+  name: string;
+  /** Image URI. ECR repos resolve from `ecr` config when matching. */
+  image: string;
+  /** Hard memory limit (MiB). Required for Fargate. */
+  memory?: number;
+  /** Soft memory reservation (MiB). */
+  memoryReservation?: number;
+  /** CPU units. */
+  cpu?: number;
+  /** Port mappings. */
+  portMappings?: Array<{ containerPort: number; protocol?: 'tcp' | 'udp' }>;
+  /** Environment variables. */
+  env?: Record<string, string>;
+  /** Secrets pulled from Secrets Manager / SSM at task start. */
+  secrets?: Record<string, string>;  // map env-var-name → secret/parameter ARN
+  /** Whether this is the essential container (default: true). */
+  essential?: boolean;
+  /** Command override. */
+  command?: string[];
+  /** awslogs config — forge auto-creates the log group when set. */
+  logging?: {
+    logGroupName: string;
+    /** Default 'ecs'. */
+    streamPrefix?: string;
+    region?: string;
+  };
+}
+
+export interface EcsTaskDefConfig {
+  /** Task definition family name. AWS auto-versions. */
+  family: string;
+  /** CPU (Fargate values: '256', '512', '1024', '2048', '4096', etc.). */
+  cpu: string;
+  /** Memory (Fargate matrix: depends on CPU choice). */
+  memory: string;
+  /** Network mode (Fargate is always 'awsvpc'). Default: 'awsvpc'. */
+  networkMode?: 'awsvpc' | 'bridge' | 'host' | 'none';
+  /** Task role ARN (assumed by the running container). */
+  taskRoleArn?: string;
+  /** Execution role ARN (used by ECS to pull from ECR / write logs / etc.). */
+  executionRoleArn?: string;
+  /** Containers. */
+  containers: EcsContainerConfig[];
+}
+
+export interface EcsServiceConfig {
+  /** Service name (Forge looks up by name within the cluster). */
+  name: string;
+  /** Cluster name. Forge defaults to ${app}-cluster if unset. */
+  clusterName?: string;
+  /** Task definition. Forge registers a new revision when this changes. */
+  taskDefinition: EcsTaskDefConfig;
+  /** Desired task count (default: 1). */
+  desiredCount?: number;
+  /**
+   * Launch type. Default: 'FARGATE'. EC2 requires a cluster with EC2
+   * capacity provider; FARGATE_SPOT is cheaper but interruptible.
+   */
+  launchType?: 'FARGATE' | 'FARGATE_SPOT' | 'EC2';
+  /** Subnet IDs (Fargate). Inferred from parent VPC if unset. */
+  subnetIds?: string[];
+  /** Security group IDs (Fargate). */
+  securityGroupIds?: string[];
+  /** Assign public IP (Fargate). Default: false. */
+  assignPublicIp?: boolean;
+  /** Wire to an ALB target group by name (declared in `albs[].targetGroups`). */
+  loadBalancer?: {
+    targetGroupName: string;
+    containerName: string;
+    containerPort: number;
+  };
+  /** Auto-scaling: request count per target. */
+  autoScaling?: {
+    minCapacity: number;
+    maxCapacity: number;
+    /** CPU utilization target % (default: 70). */
+    cpuTargetUtilization?: number;
+  };
+  /** Health check grace period (seconds). Default: 60. */
+  healthCheckGracePeriod?: number;
+  /** Tags. */
+  tags?: Record<string, string>;
+}
+
+export interface EcsClusterConfig {
+  name: string;
+  /**
+   * Capacity providers. Default: ['FARGATE'] when unset. Add 'FARGATE_SPOT'
+   * for cost-sensitive batch workloads.
+   */
+  capacityProviders?: Array<'FARGATE' | 'FARGATE_SPOT'>;
+  /** Container Insights — emits per-container CloudWatch metrics. */
+  containerInsights?: boolean;
+  /** Tags. */
+  tags?: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
 // VPC Endpoints
 // ---------------------------------------------------------------------------
 
@@ -992,6 +1221,14 @@ export interface ForgeConfig {
   certificates?: AcmCertificateConfig[];
   /** VPC endpoints (gateway: s3/dynamodb; interface: ECR / Secrets / etc.). */
   vpcEndpoints?: VpcEndpointConfig[];
+  /** Application Load Balancers (with target groups + listeners + rules). */
+  albs?: AlbConfig[];
+  /** ECS clusters (Fargate by default). */
+  ecsClusters?: EcsClusterConfig[];
+  /** ECS services (with task definitions). */
+  ecsServices?: EcsServiceConfig[];
+  /** WAF v2 web ACLs (REGIONAL for ALB / API GW; CLOUDFRONT for CF). */
+  webAcls?: WafWebAclConfig[];
 }
 
 /**

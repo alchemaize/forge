@@ -190,7 +190,7 @@ Examples:
         cloudfront: async () => (await import('./resources/cloudfront.js')).destroyCloudFront(ctx, resourceName),
         'step-functions': async () => (await import('./resources/step-functions.js')).destroyStepFunction(ctx, resourceName),
         elasticache: async () => (await import('./resources/elasticache.js')).destroyElastiCache(),
-        ecr: async () => (await import('./resources/ecs-express.js')).destroyEcr(ctx, resourceName),
+        ecr: async () => (await import('./resources/ecr.js')).destroyEcr(ctx, resourceName),
         'ecs-express': async () => (await import('./resources/ecs-express.js')).destroyEcsExpress(),
         sns: async () => (await import('./resources/sns.js')).destroySns(resourceName),
         'log-group': async () => (await import('./resources/cloudwatch.js')).destroyLogGroup(ctx, resourceName, confirmDataLoss),
@@ -200,6 +200,10 @@ Examples:
         eventbridge: async () => (await import('./resources/eventbridge.js')).destroyEventBridge(ctx, resourceName),
         'vpc-endpoint': async () => (await import('./resources/vpc-endpoint.js')).destroyVpcEndpoint(ctx, resourceName),
         'ssm-parameter': async () => (await import('./resources/ssm.js')).destroySsmParameter(ctx, resourceName),
+        alb: async () => (await import('./resources/alb.js')).destroyAlb(ctx, resourceName),
+        'ecs-cluster': async () => (await import('./resources/ecs.js')).destroyEcsCluster(),
+        'ecs-service': async () => (await import('./resources/ecs.js')).destroyEcsService(),
+        'web-acl': async () => (await import('./resources/waf.js')).destroyWebAcl(),
       };
 
       const handler = destroyRegistry[resourceType];

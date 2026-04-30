@@ -41,6 +41,10 @@ import * as acm from './resources/acm.js';
 import * as eventbridge from './resources/eventbridge.js';
 import * as vpcEndpoint from './resources/vpc-endpoint.js';
 import * as ssm from './resources/ssm.js';
+import * as ecr from './resources/ecr.js';
+import * as alb from './resources/alb.js';
+import * as ecs from './resources/ecs.js';
+import * as waf from './resources/waf.js';
 
 // ---------------------------------------------------------------------------
 // Plan
@@ -151,6 +155,27 @@ export async function plan(config: ForgeConfig): Promise<Plan> {
   // other resources.
   for (const ssmConfig of config.ssm ?? []) {
     await ssm.planSsmParameter(ctx, ssmConfig, config.app, p);
+  }
+
+  // ALBs (load balancers + target groups + listeners + rules).
+  for (const albConfig of config.albs ?? []) {
+    await alb.planAlb(ctx, albConfig, config.app, p, config);
+  }
+
+  // ECS clusters.
+  for (const clusterConfig of config.ecsClusters ?? []) {
+    await ecs.planEcsCluster(ctx, clusterConfig, config.app, p);
+  }
+
+  // ECS services. Plan after clusters + ALBs so target group / cluster
+  // references resolve.
+  for (const serviceConfig of config.ecsServices ?? []) {
+    await ecs.planEcsService(ctx, serviceConfig, config.app, p);
+  }
+
+  // WAF web ACLs.
+  for (const aclConfig of config.webAcls ?? []) {
+    await waf.planWebAcl(ctx, aclConfig, config.app, p);
   }
 
   // CloudFront
@@ -454,6 +479,36 @@ export async function apply(config: ForgeConfig): Promise<void> {
   for (const ssmConfig of config.ssm ?? []) {
     await ssm.applySsmParameter(ctx, ssmConfig, config.app);
   }
+
+  // Phase 20: ALBs. Created before ECS services so target group ARNs
+  // resolve when the service references them.
+  if (config.albs?.length) console.log(`▸ Phase: ALB (${config.albs.length})`);
+  for (const albConfig of config.albs ?? []) {
+    await alb.applyAlb(ctx, albConfig, config.app, config, vpcState?.vpcId);
+  }
+
+  // Phase 21: ECS clusters.
+  if (config.ecsClusters?.length) console.log(`▸ Phase: ECS Clusters (${config.ecsClusters.length})`);
+  for (const clusterConfig of config.ecsClusters ?? []) {
+    await ecs.applyEcsCluster(ctx, clusterConfig, config.app);
+  }
+
+  // Phase 22: ECS services. After clusters + ALBs.
+  if (config.ecsServices?.length) console.log(`▸ Phase: ECS Services (${config.ecsServices.length})`);
+  for (const serviceConfig of config.ecsServices ?? []) {
+    await ecs.applyEcsService(ctx, serviceConfig, config.app, config, vpcState?.vpcId);
+  }
+
+  // Phase 23: WAF web ACLs. After ALBs/CloudFront so the ACL can attach
+  // to a freshly-created LB or distribution.
+  if (config.webAcls?.length) console.log(`▸ Phase: WAF (${config.webAcls.length})`);
+  for (const aclConfig of config.webAcls ?? []) {
+    await waf.applyWebAcl(ctx, aclConfig, config.app);
+  }
+
+  // Suppress unused-import warning for the standalone ecr module — the
+  // engine still uses ecsExpress.applyEcr (which re-exports it).
+  void ecr;
 
   // Summary
   console.log('');
@@ -790,6 +845,49 @@ export async function status(config: ForgeConfig): Promise<void> {
       console.log(`  Parameter: ${state.name} (${state.type}, v${state.version})`);
     } else {
       console.log(`  Parameter: ${ssmConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // ALBs
+  for (const albConfig of config.albs ?? []) {
+    const state = await alb.describeAlb(ctx, albConfig);
+    if (state) {
+      console.log(`  ALB: ${albConfig.name} (${state.dnsName}, ${state.targetGroups.length} TGs, ${state.listeners.length} listeners)`);
+    } else {
+      console.log(`  ALB: ${albConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // ECS clusters
+  for (const clusterConfig of config.ecsClusters ?? []) {
+    const state = await ecs.describeEcsCluster(ctx, clusterConfig);
+    if (state) {
+      console.log(`  ECS Cluster: ${state.clusterName} (${state.status}, ${state.serviceCount} services)`);
+    } else {
+      console.log(`  ECS Cluster: ${clusterConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // ECS services. Use the planEcsService describe path (private here);
+  // forward via a fresh ListServices-like check.
+  for (const serviceConfig of config.ecsServices ?? []) {
+    // We don't expose describeEcsService directly; check via plan-like call.
+    const clusterName = serviceConfig.clusterName ?? `${config.app}-cluster`;
+    const cluster = await ecs.describeEcsCluster(ctx, { name: clusterName });
+    if (!cluster) {
+      console.log(`  ECS Service: ${serviceConfig.name} — cluster ${clusterName} NOT FOUND`);
+      continue;
+    }
+    console.log(`  ECS Service: ${serviceConfig.name} (cluster=${clusterName})`);
+  }
+
+  // WAF web ACLs
+  for (const aclConfig of config.webAcls ?? []) {
+    const state = await waf.describeWebAcl(ctx, aclConfig);
+    if (state) {
+      console.log(`  WebACL: ${state.name} (${state.scope}, ${state.ruleCount} rules, ${state.associatedResources.length} associations)`);
+    } else {
+      console.log(`  WebACL: ${aclConfig.name} — NOT FOUND`);
     }
   }
 
