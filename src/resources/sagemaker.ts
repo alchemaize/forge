@@ -161,9 +161,16 @@ export async function applySagemakerEndpoint(
   // Generate a new endpoint config name when the variant shape changes.
   // Sagemaker EndpointConfigs are immutable; you create a new one and
   // point the endpoint at it via UpdateEndpoint.
+  //
+  // Two parallel applies starting in the same millisecond would otherwise
+  // collide on `${name}-config-${ms}` because Date.now().toString(36) has
+  // no entropy beyond the millisecond. Add 6 hex chars of randomness so
+  // CI runs (or two engineers running apply at the same time) don't
+  // race into a ResourceLimitExceeded error from the second create.
   const variantHash = canonicalizeVariant(desiredVariant).slice(0, 8);
+  const randSuffix = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
   const newConfigName = config.endpointConfigName
-    ?? `${config.name}-config-${Date.now().toString(36)}-${variantHash}`;
+    ?? `${config.name}-config-${Date.now().toString(36)}${randSuffix}-${variantHash}`;
 
   // Check if the existing endpoint config already matches.
   let needNewConfig = !current;

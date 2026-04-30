@@ -345,10 +345,17 @@ export async function applyAlb(
     } else {
       listenerArn = live.arn;
       // Modify default action if it drifts. Skipping a full diff for now.
-      await elb.send(new ModifyListenerCommand({
-        ListenerArn: listenerArn,
-        DefaultActions: [{ Type: 'forward', TargetGroupArn: defaultTgArn }],
-      })).catch(() => undefined);
+      // We previously swallowed errors silently here, which masked real
+      // issues like InvalidConfigurationRequest when the target group
+      // wasn't in the same VPC. Now we surface them.
+      try {
+        await elb.send(new ModifyListenerCommand({
+          ListenerArn: listenerArn,
+          DefaultActions: [{ Type: 'forward', TargetGroupArn: defaultTgArn }],
+        }));
+      } catch (err) {
+        throw withContext(`[alb] ModifyListener port=${port}`, err);
+      }
     }
 
     // Reconcile listener rules. Forge owns rules whose Tags include

@@ -170,8 +170,16 @@ async function writeValidationToRoute53(
 ): Promise<boolean> {
   const r53: Route53Client = getClient(ctx, Route53Client);
   const zoneNameNorm = zoneName.endsWith('.') ? zoneName : `${zoneName}.`;
-  const zones = await r53.send(new ListHostedZonesCommand({}));
-  const zone = (zones.HostedZones ?? []).find(z => z.Name === zoneNameNorm);
+  // Paginate; an account with >100 zones would otherwise silently fail
+  // to find a later zone and the user would see a confusing "skip" log.
+  let zone: { Id?: string; Name?: string } | undefined;
+  let marker: string | undefined;
+  do {
+    const zones = await r53.send(new ListHostedZonesCommand({ Marker: marker }));
+    zone = (zones.HostedZones ?? []).find(z => z.Name === zoneNameNorm);
+    if (zone) break;
+    marker = zones.IsTruncated ? zones.NextMarker : undefined;
+  } while (marker);
   if (!zone) {
     console.log(`[acm] validationZoneName '${zoneName}' not found in Route 53 — skipping auto-create. Add the records manually:`);
     for (const r of records) console.log(`         ${r.name}  ${r.type}  ${r.value}`);

@@ -181,7 +181,7 @@ export async function applyEcsCluster(
  * Returning the raw input (not a Command) keeps the call site free of
  * generic-Command typing complaints.
  */
-function buildTaskDefInput(taskDef: EcsTaskDefConfig, appName: string) {
+function buildTaskDefInput(taskDef: EcsTaskDefConfig, appName: string, ctxRegion: string) {
   const containers = taskDef.containers.map(c => ({
     name: c.name,
     image: c.image,
@@ -205,7 +205,10 @@ function buildTaskDefInput(taskDef: EcsTaskDefConfig, appName: string) {
           logDriver: 'awslogs',
           options: {
             'awslogs-group': c.logging.logGroupName,
-            'awslogs-region': c.logging.region ?? '',
+            // Default to the running ctx's region. Empty string here used to
+            // pass through to ECS, which would then reject the task def with
+            // a cryptic InvalidParameterException about awslogs-region.
+            'awslogs-region': c.logging.region ?? ctxRegion,
             'awslogs-stream-prefix': c.logging.streamPrefix ?? 'ecs',
           },
         }
@@ -286,7 +289,7 @@ async function ensureLatestTaskDef(
   }
 
   // Build the desired shape and compare.
-  const desiredInput = buildTaskDefInput(taskDef, appName);
+  const desiredInput = buildTaskDefInput(taskDef, appName, ctx.region);
   const desiredCanonical = canonicalizeTaskDef({
     family: desiredInput.family,
     cpu: desiredInput.cpu,

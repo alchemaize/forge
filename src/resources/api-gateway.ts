@@ -43,6 +43,25 @@ export interface ApiGatewayState {
   routeCount: number;
 }
 
+/**
+ * Paginated lookup by API name. GetApis defaults to 25 per page; an account
+ * with many APIs would otherwise miss the target and `apply` would create a
+ * duplicate alongside it.
+ */
+async function findApiByName(
+  apigw: ApiGatewayV2Client,
+  apiName: string
+): Promise<{ ApiId?: string; ApiEndpoint?: string; Name?: string } | undefined> {
+  let nextToken: string | undefined;
+  do {
+    const listRes = await apigw.send(new GetApisCommand({ NextToken: nextToken }));
+    const match = listRes.Items?.find(a => a.Name === apiName);
+    if (match) return match;
+    nextToken = listRes.NextToken;
+  } while (nextToken);
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Describe
 // ---------------------------------------------------------------------------
@@ -53,8 +72,7 @@ export async function describeApiGateway(
 ): Promise<ApiGatewayState | null> {
   const apigw = getClient(ctx, ApiGatewayV2Client);
 
-  const listRes = await apigw.send(new GetApisCommand({}));
-  const existing = listRes.Items?.find(a => a.Name === apiName);
+  const existing = await findApiByName(apigw, apiName);
   if (!existing) return null;
 
   const apiId = existing.ApiId!;
@@ -155,8 +173,7 @@ export async function applyApiGateway(
   let apiId: string;
   let apiEndpoint: string;
 
-  const listRes = await apigw.send(new GetApisCommand({}));
-  const existing = listRes.Items?.find(a => a.Name === apiName);
+  const existing = await findApiByName(apigw, apiName);
 
   if (existing) {
     apiId = existing.ApiId!;
@@ -445,10 +462,9 @@ export async function destroyApiGateway(
   const apigw = getClient(ctx, ApiGatewayV2Client);
   const { DeleteApiCommand } = await import('@aws-sdk/client-apigatewayv2');
 
-  const listRes = await apigw.send(new GetApisCommand({}));
-  const existing = listRes.Items?.find(a => a.Name === apiName);
+  const existing = await findApiByName(apigw, apiName);
   if (!existing) {
-    console.log(`[api-gw] ${apiName} not found — nothing to destroy`);
+    console.log(`[api-gw] ${apiName} not found, nothing to destroy`);
     return;
   }
 

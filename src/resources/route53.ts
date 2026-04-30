@@ -55,10 +55,22 @@ export async function describeHostedZone(
   const wantedName = normalizeName(config.name);
   const wantedPrivate = !!config.privateZone;
 
-  const list = await r53.send(new ListHostedZonesCommand({}));
-  const match = (list.HostedZones ?? []).find(z =>
-    z.Name === wantedName && (z.Config?.PrivateZone ?? false) === wantedPrivate
-  );
+  // Paginate via Marker. AWS returns up to 100 zones per page; an account
+  // with more than that would silently miss later zones, then `apply`
+  // would call CreateHostedZone for an "absent" zone that already exists,
+  // creating a duplicate with a different Id. Real risk for any account
+  // running many domains.
+  let match: { Id?: string; Name?: string; ResourceRecordSetCount?: number } | undefined;
+  let marker: string | undefined;
+  do {
+    const list = await r53.send(new ListHostedZonesCommand({ Marker: marker }));
+    match = (list.HostedZones ?? []).find(z =>
+      z.Name === wantedName && (z.Config?.PrivateZone ?? false) === wantedPrivate
+    );
+    if (match) break;
+    marker = list.IsTruncated ? list.NextMarker : undefined;
+  } while (marker);
+
   if (!match) return null;
 
   // ID comes back as `/hostedzone/Z123ABC` from list; we want the bare ID.

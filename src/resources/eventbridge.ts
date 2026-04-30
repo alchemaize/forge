@@ -181,12 +181,18 @@ export async function applyEventBridge(
   }
 
   // State drift (PutRule sets State, but if config wants disabled we still
-  // call DisableRule explicitly — PutRule's State arg is sometimes finicky
-  // when transitioning from a different existing state).
-  if (desiredState === 'DISABLED') {
-    await eb.send(new DisableRuleCommand({ Name: config.name, EventBusName: busName })).catch(() => undefined);
-  } else {
-    await eb.send(new EnableRuleCommand({ Name: config.name, EventBusName: busName })).catch(() => undefined);
+  // call DisableRule explicitly, PutRule's State arg is sometimes finicky
+  // when transitioning from a different existing state). Silent catch is
+  // wrong here: an IAM denial or a missing rule would have masked the real
+  // problem and made the whole apply look successful.
+  try {
+    if (desiredState === 'DISABLED') {
+      await eb.send(new DisableRuleCommand({ Name: config.name, EventBusName: busName }));
+    } else {
+      await eb.send(new EnableRuleCommand({ Name: config.name, EventBusName: busName }));
+    }
+  } catch (err) {
+    throw withContext(`[eventbridge] ${desiredState === 'DISABLED' ? 'DisableRule' : 'EnableRule'} ${config.name}`, err);
   }
 
   // Target sync. EventBridge targets carry an ID per target; Forge always

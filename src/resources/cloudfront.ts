@@ -215,6 +215,11 @@ function buildDistributionConfig(
       SSLSupportMethod: 'sni-only',
       MinimumProtocolVersion: 'TLSv1.2_2021',
     } : {
+      // When using the *.cloudfront.net default cert, AWS forces
+      // MinimumProtocolVersion=TLSv1 (the API rejects anything stronger
+      // because the shared default cert presents only TLSv1). Users who
+      // need TLSv1.2_2021 must provide their own ACM cert via
+      // certificateArn — the comment in config.ts says so explicitly.
       CloudFrontDefaultCertificate: true,
       MinimumProtocolVersion: 'TLSv1',
     },
@@ -243,6 +248,9 @@ export async function applyCloudFront(
   }
 
   console.log(`[cloudfront] Creating distribution: ${config.name}`);
+  if (!config.certificateArn) {
+    console.log(`[cloudfront] WARNING: ${config.name} is using the default *.cloudfront.net cert. AWS forces MinimumProtocolVersion=TLSv1 for the default cert. For modern TLS (1.2_2021), supply certificateArn from an ACM cert in us-east-1.`);
+  }
   // CallerReference must be unique per CreateDistribution call. Use a timestamp +
   // config name so retries within the same minute don't collide silently.
   const callerRef = `forge-${config.name}-${Date.now()}`;

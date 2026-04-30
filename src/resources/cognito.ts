@@ -46,23 +46,43 @@ export async function describeCognito(
   const client = getClient(ctx, CognitoIdentityProviderClient);
   const poolName = config.poolName ?? `${appName}-user-pool`;
 
-  const listRes = await client.send(new ListUserPoolsCommand({ MaxResults: 60 }));
-  const existing = listRes.UserPools?.find(p => p.Name === poolName);
+  // ListUserPools caps at 60 per page. An account with more than 60 user
+  // pools (rare but real for shared org accounts) would otherwise miss the
+  // target pool and `apply` would CreateUserPool a duplicate alongside it.
+  let existing: { Id?: string; Name?: string } | undefined;
+  let nextToken: string | undefined;
+  do {
+    const listRes = await client.send(new ListUserPoolsCommand({
+      MaxResults: 60,
+      NextToken: nextToken,
+    }));
+    existing = listRes.UserPools?.find(p => p.Name === poolName);
+    if (existing) break;
+    nextToken = listRes.NextToken;
+  } while (nextToken);
+
   if (!existing?.Id) return null;
 
   const userPoolId = existing.Id;
   const desc = await client.send(new DescribeUserPoolCommand({ UserPoolId: userPoolId }));
   const userPoolArn = desc.UserPool?.Arn ?? '';
 
-  // Get clients
-  const clientsRes = await client.send(new ListUserPoolClientsCommand({
-    UserPoolId: userPoolId,
-    MaxResults: 60,
-  }));
-  const clients = (clientsRes.UserPoolClients ?? []).map(c => ({
-    clientId: c.ClientId!,
-    clientName: c.ClientName!,
-  }));
+  // Get clients. ListUserPoolClients caps at 60 per page; pools with more
+  // clients (a real concern for shared SaaS pools) would otherwise miss
+  // existing clients and cause Forge to recreate them with new IDs.
+  const clients: Array<{ clientId: string; clientName: string }> = [];
+  let clientsToken: string | undefined;
+  do {
+    const clientsRes = await client.send(new ListUserPoolClientsCommand({
+      UserPoolId: userPoolId,
+      MaxResults: 60,
+      NextToken: clientsToken,
+    }));
+    for (const c of clientsRes.UserPoolClients ?? []) {
+      clients.push({ clientId: c.ClientId!, clientName: c.ClientName! });
+    }
+    clientsToken = clientsRes.NextToken;
+  } while (clientsToken);
 
   return { userPoolId, userPoolArn, clients };
 }

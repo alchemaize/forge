@@ -78,12 +78,31 @@ export async function describeWebAcl(
   const acl = detail.WebACL!;
 
   // Resources associated with this ACL.
+  // ListResourcesForWebACL DEFAULTS to ResourceType=APPLICATION_LOAD_BALANCER
+  // and only returns one type per call. To get a complete association list
+  // we have to enumerate every supported regional type. Without this the
+  // describe could miss API Gateway / AppSync / Cognito / App Runner /
+  // Verified Access associations and a downstream check for "is this ACL
+  // attached anywhere" would silently lie.
   let associatedResources: string[] = [];
   if (scope === 'REGIONAL') {
-    const assoc = await waf.send(new ListResourcesForWebACLCommand({
-      WebACLArn: summary.ARN,
-    })).catch(() => undefined);
-    associatedResources = assoc?.ResourceArns ?? [];
+    const regionalTypes = [
+      'APPLICATION_LOAD_BALANCER',
+      'API_GATEWAY',
+      'APPSYNC',
+      'COGNITO_USER_POOL',
+      'APP_RUNNER_SERVICE',
+      'VERIFIED_ACCESS_INSTANCE',
+    ] as const;
+    for (const ResourceType of regionalTypes) {
+      const assoc = await waf.send(new ListResourcesForWebACLCommand({
+        WebACLArn: summary.ARN,
+        ResourceType,
+      })).catch(() => undefined);
+      if (assoc?.ResourceArns?.length) {
+        associatedResources.push(...assoc.ResourceArns);
+      }
+    }
   }
   // CloudFront associations live on the distribution itself; describing
   // them requires a CloudFront API roundtrip per distribution, which

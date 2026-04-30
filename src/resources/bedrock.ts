@@ -250,6 +250,75 @@ function buildGuardrailPayload(config: BedrockGuardrailConfig): any {
   return payload;
 }
 
+/**
+ * Build an UpdateGuardrail payload that preserves existing policy fields
+ * the user didn't specify in config. AWS UpdateGuardrail uses replace
+ * semantics: any *PolicyConfig field omitted from the request gets wiped
+ * from the live guardrail. Without this merge, a config that adds only
+ * `contentFilters` would silently delete denied topics and PII rules
+ * configured by other tooling or by hand.
+ *
+ * GetGuardrail returns `contentPolicy.filters` etc.; UpdateGuardrail
+ * expects `contentPolicyConfig.filtersConfig`. We translate shapes here.
+ */
+function buildGuardrailUpdatePayload(
+  config: BedrockGuardrailConfig,
+  current: GuardrailState
+): any {
+  const payload = buildGuardrailPayload(config);
+
+  if (!payload.contentPolicyConfig && current.contentPolicyConfig) {
+    const live = current.contentPolicyConfig as any;
+    if (live.filters?.length) {
+      payload.contentPolicyConfig = {
+        filtersConfig: live.filters.map((f: any) => ({
+          type: f.type,
+          inputStrength: f.inputStrength,
+          outputStrength: f.outputStrength,
+        })),
+      };
+    }
+  }
+
+  if (!payload.topicPolicyConfig && current.topicPolicyConfig) {
+    const live = current.topicPolicyConfig as any;
+    if (live.topics?.length) {
+      payload.topicPolicyConfig = {
+        topicsConfig: live.topics.map((t: any) => ({
+          name: t.name,
+          type: t.type,
+          definition: t.definition,
+          examples: t.examples,
+        })),
+      };
+    }
+  }
+
+  if (!payload.sensitiveInformationPolicyConfig && current.sensitiveInformationPolicyConfig) {
+    const live = current.sensitiveInformationPolicyConfig as any;
+    const sip: any = {};
+    if (live.piiEntities?.length) {
+      sip.piiEntitiesConfig = live.piiEntities.map((p: any) => ({
+        type: p.type,
+        action: p.action,
+      }));
+    }
+    if (live.regexes?.length) {
+      sip.regexesConfig = live.regexes.map((r: any) => ({
+        name: r.name,
+        description: r.description,
+        pattern: r.pattern,
+        action: r.action,
+      }));
+    }
+    if (Object.keys(sip).length > 0) {
+      payload.sensitiveInformationPolicyConfig = sip;
+    }
+  }
+
+  return payload;
+}
+
 export async function planGuardrail(
   ctx: AwsContext,
   config: BedrockGuardrailConfig,
@@ -324,10 +393,14 @@ export async function applyGuardrail(
     }
   } else {
     console.log(`[bedrock-guardrail] Updating: ${config.name}`);
+    // Use the merge variant — UpdateGuardrail wipes any *PolicyConfig field
+    // not in the request, so we backfill from live state for fields the
+    // user didn't specify in config.
+    const updatePayload = buildGuardrailUpdatePayload(config, current);
     try {
       await br.send(new UpdateGuardrailCommand({
         guardrailIdentifier: current.guardrailId,
-        ...payload,
+        ...updatePayload,
       }));
     } catch (err) {
       throw withContext(`[bedrock-guardrail] UpdateGuardrail ${config.name}`, err);

@@ -103,28 +103,26 @@ export async function describeRds(
       const cluster = res.DBClusters?.[0];
       if (!cluster) return null;
 
-      // Check for proxy
+      // Check for proxy. AWS RDS DescribeDBProxies' Filters parameter is
+      // documented as "not currently supported" — passing Filters either
+      // raises InvalidParameterValue or is silently ignored depending on
+      // region. Look up by DBProxyName instead. We name it `${app}-proxy`
+      // by convention; a future enhancement would also accept an explicit
+      // proxyName from config.
       let proxyEndpoint: string | undefined;
       let proxyArn: string | undefined;
       try {
-        const proxyRes = await rds.send(new DescribeDBProxiesCommand({
-          Filters: [{ Name: 'db-cluster-id', Values: [clusterId] }],
+        const proxyByName = await rds.send(new DescribeDBProxiesCommand({
+          DBProxyName: `${appName}-proxy`,
         }));
-        // Filter didn't work? Try by name
-        if (!proxyRes.DBProxies?.length) {
-          const proxyByName = await rds.send(new DescribeDBProxiesCommand({
-            DBProxyName: `${appName}-proxy`,
-          }));
-          if (proxyByName.DBProxies?.length) {
-            proxyEndpoint = proxyByName.DBProxies[0].Endpoint;
-            proxyArn = proxyByName.DBProxies[0].DBProxyArn;
-          }
-        } else {
-          proxyEndpoint = proxyRes.DBProxies[0].Endpoint;
-          proxyArn = proxyRes.DBProxies[0].DBProxyArn;
+        if (proxyByName.DBProxies?.length) {
+          proxyEndpoint = proxyByName.DBProxies[0].Endpoint;
+          proxyArn = proxyByName.DBProxies[0].DBProxyArn;
         }
-      } catch {
-        // Proxy doesn't exist
+      } catch (err: any) {
+        // DBProxyNotFoundFault is the expected "no proxy yet" path; rethrow
+        // anything else so we don't mask credential / network failures.
+        if (err.name !== 'DBProxyNotFoundFault') throw err;
       }
 
       return {
