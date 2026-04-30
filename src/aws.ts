@@ -50,10 +50,16 @@ export async function initAwsContext(config: ForgeConfig): Promise<AwsContext> {
  * the programmatic API) doesn't get a client pointed at the wrong account.
  * Earlier versions cached on ClientClass.name alone and would silently
  * serve a us-east-1 client when the second config asked for us-west-2.
+ *
+ * `maxAttempts: 6` + adaptive retry mode gives us the SDK's built-in
+ * exponential backoff for ThrottlingException, ProvisionedThroughputExceeded,
+ * RequestLimitExceeded, and the rest of the transient family. Without this,
+ * a 50-Lambda apply that hits IAM hard could fail mid-way and leave the
+ * stack half-applied.
  */
 export function getClient<T>(
   ctx: AwsContext,
-  ClientClass: new (config: { region: string; credentials: ReturnType<typeof fromIni> }) => T,
+  ClientClass: new (config: { region: string; credentials: ReturnType<typeof fromIni>; maxAttempts?: number; retryMode?: string }) => T,
   key?: string
 ): T {
   const baseKey = key ?? ClientClass.name;
@@ -62,6 +68,8 @@ export function getClient<T>(
     clientCache.set(cacheKey, new ClientClass({
       region: ctx.region,
       credentials: ctx.credentials,
+      maxAttempts: 6,
+      retryMode: 'adaptive',
     }));
   }
   return clientCache.get(cacheKey) as T;

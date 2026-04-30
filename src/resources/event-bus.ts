@@ -101,3 +101,10 @@ export async function applyEventBus(
     arn: res.EventBusArn ?? '',
   };
 }
+
+export async function destroyEventBus(): Promise<never> {
+  throw new Error(
+    'forge refuses to destroy custom EventBuses. Rules attached to the bus would lose their target.\n' +
+    'Migrate or delete the rules first, then DeleteEventBus via AWS Console or CLI.'
+  );
+}

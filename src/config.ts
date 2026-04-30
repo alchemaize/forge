@@ -135,6 +135,52 @@ export interface CognitoConfig {
 }
 
 // ---------------------------------------------------------------------------
+// IAM inline policies (used by Lambda role config)
+// ---------------------------------------------------------------------------
+
+export interface InlinePolicyStatement {
+  sid?: string;
+  effect: 'Allow' | 'Deny';
+  actions: string[];
+  resources: string[];
+  conditions?: Record<string, unknown>;
+  principal?: unknown;
+}
+
+/**
+ * Named-form inline policy. Recommended for new configs and the round-trip
+ * shape Forge import emits because it preserves the policy's name in the
+ * IAM console and the plan output. CFN-imported policies always land here.
+ */
+export interface NamedInlinePolicy {
+  name: string;
+  statements: InlinePolicyStatement[];
+}
+
+/**
+ * Flat-form inline policy. Backward-compat shape; multiple flat entries
+ * are merged into a single 'forge-inline' policy on apply. Discriminate
+ * from NamedInlinePolicy via isNamedInlinePolicy().
+ */
+export interface FlatInlinePolicy {
+  effect: 'Allow' | 'Deny';
+  actions: string[];
+  resources: string[];
+}
+
+export type InlinePolicy = NamedInlinePolicy | FlatInlinePolicy;
+
+/**
+ * Type guard for the named form. Use this in apply paths instead of
+ * runtime probing on `(p as any).name` so a typo like `statments`
+ * fails the type check rather than silently falling through to flat.
+ */
+export function isNamedInlinePolicy(p: InlinePolicy): p is NamedInlinePolicy {
+  return typeof (p as NamedInlinePolicy).name === 'string'
+    && Array.isArray((p as NamedInlinePolicy).statements);
+}
+
+// ---------------------------------------------------------------------------
 // Lambda
 // ---------------------------------------------------------------------------
 
@@ -184,24 +230,7 @@ export interface LambdaFunctionConfig {
    * entries are merged into a single 'forge-inline' policy. CFN-named policies that
    * Forge captures via import are written in the named form so they round-trip cleanly.
    */
-  inlinePolicies?: Array<
-    | {
-        name: string;
-        statements: Array<{
-          sid?: string;
-          effect: 'Allow' | 'Deny';
-          actions: string[];
-          resources: string[];
-          conditions?: Record<string, unknown>;
-          principal?: unknown;
-        }>;
-      }
-    | {
-        effect: 'Allow' | 'Deny';
-        actions: string[];
-        resources: string[];
-      }
-  >;
+  inlinePolicies?: InlinePolicy[];
   /** Layers (ARNs) */
   layers?: string[];
   /** Function URL configuration. When set, Forge ensures the URL exists with the
@@ -248,6 +277,13 @@ export interface ApiGatewayRouteConfig {
   targetLambda?: string;
 }
 
+/**
+ * Route entries can be either a plain "GET /path" string (auth and target
+ * Lambda implied by the array they're in) or a structured object with
+ * per-route overrides.
+ */
+export type ApiGatewayRouteEntry = string | ApiGatewayRouteConfig;
+
 export interface ApiGatewayConfig {
   /** API name (default: {app}-api) */
   name?: string;
@@ -257,10 +293,19 @@ export interface ApiGatewayConfig {
   corsMethods?: string[];
   /** Use catch-all {proxy+} with JWT (default: true) */
   catchAll?: boolean;
-  /** Public routes (no JWT) */
-  publicRoutes?: string[];
-  /** Explicit authenticated routes (only if catchAll is false) */
-  authenticatedRoutes?: string[];
+  /**
+   * Public routes (no JWT). Each entry is either a route key string like
+   * "GET /health" or an object `{ routeKey, targetLambda }` to direct the
+   * route at a specific Lambda by name (e.g. for an upload endpoint
+   * routed at `upload-handler`, distinct from the default API Lambda).
+   */
+  publicRoutes?: ApiGatewayRouteEntry[];
+  /**
+   * Authenticated routes (require JWT). Used when `catchAll` is false, or
+   * alongside it for routes that should land on a specific Lambda rather
+   * than the catch-all integration.
+   */
+  authenticatedRoutes?: ApiGatewayRouteEntry[];
   /** Cognito user pool ID for JWT authorizer (auto-resolved if cognito config exists) */
   cognitoPoolId?: string;
   /** Cognito client ID for JWT audience */

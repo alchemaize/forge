@@ -218,7 +218,16 @@ export async function apply(config: ForgeConfig): Promise<void> {
   // must come after their referenced SGs.
   const sgNameMap = new Map<string, string>();
   for (const sgConfig of config.securityGroups ?? []) {
-    await securityGroup.applySecurityGroup(ctx, sgConfig, config.app, config, sgNameMap);
+    // Pass vpcState?.vpcId so SGs in create-mode VPC configs resolve
+    // (parentConfig.vpc.vpcId is undefined for create mode).
+    await securityGroup.applySecurityGroup(
+      ctx,
+      sgConfig,
+      config.app,
+      config,
+      sgNameMap,
+      vpcState?.vpcId,
+    );
   }
   if (config.securityGroups?.length) console.log('');
 
@@ -286,7 +295,7 @@ export async function apply(config: ForgeConfig): Promise<void> {
       ctx,
       config.apiGateway,
       config.app,
-      lambdaStates[0],
+      lambdaStates,
       cognitoState
     );
     console.log('');
@@ -489,6 +498,90 @@ export async function status(config: ForgeConfig): Promise<void> {
       console.log(`  SQS: ${sqsConfig.name} (~${state.approximateMessages} messages)`);
     } else {
       console.log(`  SQS: ${sqsConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // S3
+  for (const bucketConfig of config.s3 ?? []) {
+    const bucketName = bucketConfig.name
+      .replace(/\{account\}/g, ctx.accountId)
+      .replace(/\{region\}/g, ctx.region)
+      .replace(/\{app\}/g, config.app);
+    const state = await s3.describeS3Bucket(ctx, bucketName);
+    if (state) {
+      console.log(`  S3: ${bucketName}`);
+    } else {
+      console.log(`  S3: ${bucketName} — NOT FOUND`);
+    }
+  }
+
+  // KMS
+  for (const kmsConfig of config.kms ?? []) {
+    const state = await kms.describeKms(ctx, kmsConfig);
+    if (state) {
+      console.log(`  KMS: ${kmsConfig.alias} (${state.keyId}, rotation=${state.rotationEnabled})`);
+    } else {
+      console.log(`  KMS: ${kmsConfig.alias} — NOT FOUND`);
+    }
+  }
+
+  // Secrets Manager
+  for (const secretConfig of config.secrets ?? []) {
+    const state = await secrets.describeSecret(ctx, secretConfig);
+    if (state) {
+      console.log(`  Secret: ${secretConfig.name} (${state.arn.split(':').pop()})`);
+    } else {
+      console.log(`  Secret: ${secretConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Pinpoint
+  for (const ppConfig of config.pinpoint ?? []) {
+    const state = await pinpoint.describePinpoint(ctx, ppConfig);
+    if (state) {
+      console.log(`  Pinpoint: ${ppConfig.name} (${state.appId})`);
+    } else {
+      console.log(`  Pinpoint: ${ppConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // IAM Managed Policies
+  for (const mpConfig of config.managedPolicies ?? []) {
+    const state = await iamManagedPolicy.describeManagedPolicy(ctx, mpConfig);
+    if (state) {
+      console.log(`  ManagedPolicy: ${mpConfig.name} (v${state.defaultVersionId})`);
+    } else {
+      console.log(`  ManagedPolicy: ${mpConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Security Groups
+  for (const sgConfig of config.securityGroups ?? []) {
+    const state = await securityGroup.describeSecurityGroup(ctx, sgConfig, config);
+    if (state) {
+      console.log(`  SecurityGroup: ${sgConfig.name} (${state.groupId}, ingress=${state.ingressCount}, egress=${state.egressCount})`);
+    } else {
+      console.log(`  SecurityGroup: ${sgConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Lambda Layers
+  for (const layerConfig of config.lambdaLayers ?? []) {
+    const state = await lambdaLayer.describeLayer(ctx, layerConfig);
+    if (state) {
+      console.log(`  Layer: ${layerConfig.name} (v${state.latestVersionNumber})`);
+    } else {
+      console.log(`  Layer: ${layerConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Event Buses
+  for (const ebConfig of config.eventBuses ?? []) {
+    const state = await eventBus.describeEventBus(ctx, ebConfig);
+    if (state) {
+      console.log(`  EventBus: ${ebConfig.name}`);
+    } else {
+      console.log(`  EventBus: ${ebConfig.name} — NOT FOUND`);
     }
   }
 

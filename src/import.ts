@@ -1326,7 +1326,15 @@ function formatObject(obj: any, indent: number): string {
 }
 
 function formatValue(val: unknown): string {
-  if (typeof val === 'string') return `'${val}'`;
+  if (typeof val === 'string') {
+    // JSON.stringify emits a syntactically-valid TS string literal (double
+    // quotes, escapes embedded quotes / backslashes / control chars
+    // correctly). The earlier `'${val}'` form broke when the value contained
+    // a single quote (e.g., a description like "Citizen's portal") because
+    // the apostrophe terminated the literal mid-string and produced
+    // invalid TypeScript.
+    return JSON.stringify(val);
+  }
   if (typeof val === 'boolean') return val ? 'true' : 'false';
   if (typeof val === 'number') return String(val);
   return String(val);

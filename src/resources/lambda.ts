@@ -35,7 +35,8 @@ import {
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import type { AwsContext } from '../aws.js';
-import type { LambdaFunctionConfig } from '../config.js';
+import type { LambdaFunctionConfig, InlinePolicyStatement } from '../config.js';
+import { isNamedInlinePolicy } from '../config.js';
 import type { VpcState } from './vpc.js';
 import { getClient, canonicalize } from '../aws.js';
 import { addChange, type Plan } from '../diff.js';
@@ -56,6 +57,8 @@ export interface LambdaState {
   vpcSubnetIds: string[];
   /** VPC security groups the Lambda is currently attached to. */
   vpcSecurityGroupIds: string[];
+  /** "arm64" or "x86_64". Matches the Architectures array's first entry. */
+  architecture: 'arm64' | 'x86_64';
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +86,7 @@ export async function describeLambda(
       env: cfg.Environment?.Variables ?? {},
       vpcSubnetIds: cfg.VpcConfig?.SubnetIds ?? [],
       vpcSecurityGroupIds: cfg.VpcConfig?.SecurityGroupIds ?? [],
+      architecture: (cfg.Architectures?.[0] ?? 'arm64') as 'arm64' | 'x86_64',
     };
   } catch (err: any) {
     if (err.name === 'ResourceNotFoundException') return null;
@@ -123,6 +127,16 @@ export async function planLambda(
     }
     if (current.roleArn !== desiredRoleArn) {
       fields.push({ field: 'roleArn', current: current.roleArn, desired: desiredRoleArn });
+    }
+    if (config.architecture && current.architecture !== config.architecture) {
+      // Architecture changes require a fresh code upload built for the
+      // target arch; we surface drift but apply will not flip it without
+      // a zipPath (the existing code is built for the wrong arch).
+      fields.push({
+        field: 'architecture',
+        current: current.architecture,
+        desired: `${config.architecture} (requires fresh zipPath)`,
+      });
     }
 
     // Check env var drift if env vars are specified in config
@@ -367,9 +381,8 @@ async function syncRolePolicies(
   // CDK-named policies (captured during import) instead of duplicating them.
   if (config.inlinePolicies?.length) {
     const grouped: Map<string, Array<{ effect: string; actions: string[]; resources: string[]; sid?: string; conditions?: unknown }>> = new Map();
-    for (const rawP of config.inlinePolicies) {
-      const p = rawP as any;
-      if (p.name && Array.isArray(p.statements)) {
+    for (const p of config.inlinePolicies) {
+      if (isNamedInlinePolicy(p)) {
         // Named-form: explicit policy name with multiple statements.
         grouped.set(p.name, p.statements);
       } else {
@@ -477,22 +490,45 @@ async function ensureExecutionRole(
     await iam.send(new AttachRolePolicyCommand({ RoleName: roleName, PolicyArn: policyArn }));
   }
 
-  // Inline policies (greenfield create path — uses the same flat-form-only behavior
-  // that existed before. Adoption-mode goes through syncRolePolicies which handles
-  // both flat and named forms. New roles created from scratch shouldn't have CDK-named
-  // policies to worry about, so flat-only is fine here.)
+  // Inline policies on a freshly-created role.
+  //
+  // Earlier this path only handled flat-form entries on greenfield, with
+  // the comment that "new roles created from scratch shouldn't have
+  // CDK-named policies to worry about." That was wrong: a config with
+  // named-form inline policies (the recommended form, and the import
+  // round-trip shape) would create a brand-new role with NO inline
+  // policies, leaving the function under-privileged on first invoke
+  // until a follow-up apply ran syncRolePolicies. Now we apply both
+  // forms here so the role is fully-formed at create time.
   if (config.inlinePolicies?.length) {
-    const flatStatements = (config.inlinePolicies as any[])
-      .filter(p => !p.name && !p.statements)
-      .map((p: any) => ({ Effect: p.effect, Action: p.actions, Resource: p.resources }));
-    if (flatStatements.length > 0) {
+    const grouped = new Map<string, Array<InlinePolicyStatement>>();
+    for (const p of config.inlinePolicies) {
+      if (isNamedInlinePolicy(p)) {
+        grouped.set(p.name, p.statements);
+      } else {
+        const list = grouped.get('forge-inline') ?? [];
+        list.push({ effect: p.effect, actions: p.actions, resources: p.resources });
+        grouped.set('forge-inline', list);
+      }
+    }
+    for (const [policyName, statements] of grouped) {
+      const doc = {
+        Version: '2012-10-17',
+        Statement: statements.map(s => {
+          const stmt: Record<string, unknown> = {
+            Effect: s.effect,
+            Action: s.actions,
+            Resource: s.resources,
+          };
+          if (s.sid) stmt.Sid = s.sid;
+          if (s.conditions) stmt.Condition = s.conditions;
+          return stmt;
+        }),
+      };
       await iam.send(new PutRolePolicyCommand({
         RoleName: roleName,
-        PolicyName: 'forge-inline',
-        PolicyDocument: JSON.stringify({
-          Version: '2012-10-17',
-          Statement: flatStatements,
-        }),
+        PolicyName: policyName,
+        PolicyDocument: JSON.stringify(doc),
       }));
     }
   }
@@ -699,6 +735,7 @@ export async function applyLambda(
     env: environment?.Variables ?? {},
     vpcSubnetIds: vpcConfig?.SubnetIds ?? [],
     vpcSecurityGroupIds: vpcConfig?.SecurityGroupIds ?? [],
+    architecture,
   };
 }
 

@@ -168,39 +168,46 @@ Examples:
       const { initAwsContext } = await import('./aws.js');
       const ctx = await initAwsContext(config);
 
-      switch (resourceType) {
-        case 'vpc':
-          const { destroyVpc } = await import('./resources/vpc.js');
-          await destroyVpc();
-          break;
-        case 'rds':
-          const { destroyRds } = await import('./resources/rds.js');
-          await destroyRds();
-          break;
-        case 'cognito':
-          const { destroyCognito } = await import('./resources/cognito.js');
-          await destroyCognito();
-          break;
-        case 'lambda':
-          const { destroyLambda } = await import('./resources/lambda.js');
-          await destroyLambda(ctx, resourceName);
-          break;
-        case 'api-gateway':
-          const { destroyApiGateway } = await import('./resources/api-gateway.js');
-          await destroyApiGateway(ctx, resourceName);
-          break;
-        case 'dynamodb':
-          const { destroyDynamoTable } = await import('./resources/dynamodb.js');
-          await destroyDynamoTable(ctx, resourceName, confirmDataLoss);
-          break;
-        case 's3':
-          const { destroyS3Bucket } = await import('./resources/s3.js');
-          await destroyS3Bucket(ctx, resourceName, confirmDataLoss);
-          break;
-        default:
-          console.error(`Unknown resource type: ${resourceType}`);
-          console.error('Valid types: vpc, rds, cognito, lambda, api-gateway, dynamodb, s3');
-          process.exit(1);
+      // Registry of destroy handlers. Adding a new resource type means one
+      // entry here, not a new switch case. Each entry returns a thunk so we
+      // can lazy-import the module only when its destroy is invoked.
+      const destroyRegistry: Record<string, () => Promise<unknown>> = {
+        vpc: async () => (await import('./resources/vpc.js')).destroyVpc(),
+        rds: async () => (await import('./resources/rds.js')).destroyRds(),
+        cognito: async () => (await import('./resources/cognito.js')).destroyCognito(),
+        lambda: async () => (await import('./resources/lambda.js')).destroyLambda(ctx, resourceName),
+        'api-gateway': async () => (await import('./resources/api-gateway.js')).destroyApiGateway(ctx, resourceName),
+        dynamodb: async () => (await import('./resources/dynamodb.js')).destroyDynamoTable(ctx, resourceName, confirmDataLoss),
+        s3: async () => (await import('./resources/s3.js')).destroyS3Bucket(ctx, resourceName, confirmDataLoss),
+        sqs: async () => (await import('./resources/sqs.js')).destroySqs(resourceName),
+        kms: async () => (await import('./resources/kms.js')).destroyKms(),
+        'secrets-manager': async () => (await import('./resources/secrets-manager.js')).destroySecret(),
+        pinpoint: async () => (await import('./resources/pinpoint.js')).destroyPinpoint(),
+        'iam-managed-policy': async () => (await import('./resources/iam-managed-policy.js')).destroyManagedPolicy(),
+        'security-group': async () => (await import('./resources/security-group.js')).destroySecurityGroup(),
+        'lambda-layer': async () => (await import('./resources/lambda-layer.js')).destroyLayer(),
+        'event-bus': async () => (await import('./resources/event-bus.js')).destroyEventBus(),
+        cloudfront: async () => (await import('./resources/cloudfront.js')).destroyCloudFront(ctx, resourceName),
+        'step-functions': async () => (await import('./resources/step-functions.js')).destroyStepFunction(ctx, resourceName),
+        elasticache: async () => (await import('./resources/elasticache.js')).destroyElastiCache(),
+        ecr: async () => (await import('./resources/ecs-express.js')).destroyEcr(ctx, resourceName),
+        'ecs-express': async () => (await import('./resources/ecs-express.js')).destroyEcsExpress(),
+      };
+
+      const handler = destroyRegistry[resourceType];
+      if (!handler) {
+        console.error(`Unknown resource type: ${resourceType}`);
+        console.error(`Valid types: ${Object.keys(destroyRegistry).sort().join(', ')}`);
+        process.exit(1);
+      }
+
+      try {
+        await handler();
+      } catch (err: any) {
+        // Most destroy handlers throw with an actionable message
+        // (especially the "refused" tier-1 resources). Print and exit non-zero.
+        console.error(err.message);
+        process.exit(1);
       }
       break;
     }

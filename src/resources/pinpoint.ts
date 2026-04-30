@@ -103,3 +103,11 @@ export async function applyPinpoint(
   console.log(`[pinpoint] Created: ${appId}`);
   return { appId, name: config.name };
 }
+
+export async function destroyPinpoint(): Promise<never> {
+  throw new Error(
+    'forge refuses to destroy Pinpoint apps. Endpoints, segments, and analytics history are irreversible.\n' +
+    'Pinpoint is also being discontinued by AWS on 2026-10-30 (push/SMS/voice survive under End User Messaging),\n' +
+    'so manual cleanup via Console is the right path.'
+  );
+}

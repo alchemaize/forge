@@ -56,7 +56,19 @@ const COLORS = {
   gray: '\x1b[90m',
 };
 
+/**
+ * Color is on for interactive terminals, off when piped to a file or
+ * when NO_COLOR is set. Honors the NO_COLOR convention (https://no-color.org/)
+ * and FORCE_COLOR for the rare case of wanting color despite a non-TTY.
+ */
+function colorEnabled(): boolean {
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true;
+  if (process.env.NO_COLOR) return false;
+  return !!process.stdout.isTTY;
+}
+
 function colorize(text: string, color: keyof typeof COLORS): string {
+  if (!colorEnabled()) return text;
   return `${COLORS[color]}${text}${COLORS.reset}`;
 }
 

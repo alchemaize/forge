@@ -248,3 +248,16 @@ export async function applyStepFunction(
     roleArn,
   };
 }
+
+export async function destroyStepFunction(ctx: AwsContext, name: string): Promise<void> {
+  const sfn: SFNClient = getClient(ctx, SFNClient);
+  // Find the state machine ARN by name (cli only knows the name).
+  const list = await sfn.send(new ListStateMachinesCommand({ maxResults: 100 }));
+  const match = list.stateMachines?.find(sm => sm.name === name);
+  if (!match) {
+    throw new Error(`[step-functions] State machine '${name}' not found.`);
+  }
+  const { DeleteStateMachineCommand } = await import('@aws-sdk/client-sfn');
+  await sfn.send(new DeleteStateMachineCommand({ stateMachineArn: match.stateMachineArn }));
+  console.log(`[step-functions] Deleted: ${name}`);
+}

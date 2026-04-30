@@ -269,6 +269,15 @@ export async function applyCloudFront(
   };
 }
 
+export async function destroyCloudFront(_ctx: AwsContext, name: string): Promise<never> {
+  throw new Error(
+    `forge refuses to destroy CloudFront distribution '${name}' automatically.\n` +
+    'Distributions take 10-15 minutes to disable, then 10-15 minutes to delete,\n' +
+    'and breaking the wrong one takes a public site offline. Disable the\n' +
+    'distribution via the AWS Console, wait for "Deployed" status, then delete.'
+  );
+}
+
 // Suppress unused-import warnings for symbols reserved for future use.
 void GetDistributionCommand;
 void UpdateDistributionCommand;

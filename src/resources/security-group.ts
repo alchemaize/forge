@@ -39,8 +39,25 @@ export interface SecurityGroupState {
   egressCount: number;
 }
 
-function resolveVpcId(config: SecurityGroupConfig, parentConfig?: ForgeConfig): string | undefined {
+/**
+ * Resolve the VPC ID for an SG. Priority order:
+ *   1. Explicit config.vpcId on the SG itself.
+ *   2. vpcState.vpcId — set by the engine after Phase 1 runs. This is the
+ *      ONLY way create-mode VPCs (where the user doesn't know the ID until
+ *      after apply) can be referenced by SGs in the same config.
+ *   3. parentConfig.vpc.vpcId for lookup-mode VPCs (set in config).
+ *
+ * Earlier the function only checked parentConfig.vpc.vpcId, so an SG in a
+ * config with `vpc.mode: 'create'` had no resolvable VPC ID and apply would
+ * throw "no VPC ID available."
+ */
+function resolveVpcId(
+  config: SecurityGroupConfig,
+  parentConfig?: ForgeConfig,
+  vpcStateId?: string,
+): string | undefined {
   if (config.vpcId) return config.vpcId;
+  if (vpcStateId) return vpcStateId;
   if (parentConfig?.vpc?.mode === 'lookup' && parentConfig.vpc.vpcId) return parentConfig.vpc.vpcId;
   return undefined;
 }
@@ -52,10 +69,11 @@ function resolveVpcId(config: SecurityGroupConfig, parentConfig?: ForgeConfig): 
 export async function describeSecurityGroup(
   ctx: AwsContext,
   config: SecurityGroupConfig,
-  parentConfig?: ForgeConfig
+  parentConfig?: ForgeConfig,
+  vpcStateId?: string,
 ): Promise<SecurityGroupState | null> {
   const ec2: EC2Client = getClient(ctx, EC2Client);
-  const vpcId = resolveVpcId(config, parentConfig);
+  const vpcId = resolveVpcId(config, parentConfig, vpcStateId);
 
   const filters: Array<{ Name: string; Values: string[] }> = [
     { Name: 'group-name', Values: [config.name] },
@@ -88,9 +106,10 @@ export async function planSecurityGroup(
   config: SecurityGroupConfig,
   _appName: string,
   plan: Plan,
-  parentConfig?: ForgeConfig
+  parentConfig?: ForgeConfig,
+  vpcStateId?: string,
 ): Promise<SecurityGroupState | null> {
-  const current = await describeSecurityGroup(ctx, config, parentConfig);
+  const current = await describeSecurityGroup(ctx, config, parentConfig, vpcStateId);
 
   if (current) {
     addChange(plan, {
@@ -148,15 +167,19 @@ export async function applySecurityGroup(
   parentConfig?: ForgeConfig,
   /** Map of SG name → GroupId, populated as SGs are applied so subsequent SGs
    * can reference earlier ones via name. */
-  sgNameMap?: Map<string, string>
+  sgNameMap?: Map<string, string>,
+  /** VPC ID resolved by the engine after Phase 1 (vpc apply). Required when
+   * the parent config uses `vpc.mode: 'create'` because the ID isn't known
+   * statically. */
+  vpcStateId?: string,
 ): Promise<SecurityGroupState> {
   const ec2: EC2Client = getClient(ctx, EC2Client);
-  const vpcId = resolveVpcId(config, parentConfig);
+  const vpcId = resolveVpcId(config, parentConfig, vpcStateId);
   if (!vpcId) {
     throw new Error(`[security-group] ${config.name}: no VPC ID available. Set config.vpcId or config.vpc.vpcId.`);
   }
 
-  let current = await describeSecurityGroup(ctx, config, parentConfig);
+  let current = await describeSecurityGroup(ctx, config, parentConfig, vpcStateId);
 
   if (!current) {
     console.log(`[security-group] Creating: ${config.name}`);
@@ -362,4 +385,12 @@ async function pruneExtraRules(
       }
     }
   }
+}
+
+export async function destroySecurityGroup(): Promise<never> {
+  throw new Error(
+    'forge refuses to destroy security groups. Lambdas, RDS, EC2, and any\n' +
+    'other resource referencing the SG by ID would break. Detach first, then\n' +
+    'use AWS Console or CLI to delete.'
+  );
 }

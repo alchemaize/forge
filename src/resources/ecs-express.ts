@@ -239,3 +239,17 @@ export async function applyEcsExpress(
     `A proper full-ECS module (CreateService + RegisterTaskDefinition + ALB) is on the roadmap.`
   );
 }
+
+export async function destroyEcr(_ctx: AwsContext, name: string): Promise<never> {
+  throw new Error(
+    `forge refuses to destroy ECR repository '${name}'. Running ECS / Lambda / App Runner\n` +
+    'workloads referencing the image break immediately. Empty + delete via AWS Console.'
+  );
+}
+
+export async function destroyEcsExpress(): Promise<never> {
+  throw new Error(
+    'forge refuses to destroy ECS services. Use AWS Console or CLI; ensure target group\n' +
+    'and load balancer are detached or destroyed cleanly first.'
+  );
+}

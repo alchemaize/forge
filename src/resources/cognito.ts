@@ -83,8 +83,12 @@ export async function planCognito(
   if (current) {
     const fields: Array<{ field: string; current: unknown; desired: unknown }> = [];
 
-    // Missing clients
-    const desiredClients = config.clients ?? [{ name: `${appName}-app-client` }];
+    // Missing clients. Match the apply-side defaulting: only emit the
+    // built-in `${app}-app-client` default when the pool has no clients.
+    // Otherwise an adopted pool with a CDK-named client would always show
+    // a phantom create in plan.
+    const desiredClients = config.clients
+      ?? (current.clients.length === 0 ? [{ name: `${appName}-app-client` }] : []);
     for (const dc of desiredClients) {
       if (!current.clients.some(cc => cc.clientName === dc.name)) {
         fields.push({ field: `client:${dc.name}`, current: undefined, desired: 'create' });
@@ -244,11 +248,21 @@ export async function applyCognito(
     }
   }
 
-  // Ensure clients exist
-  const desiredClients = config.clients ?? [{
-    name: `${appName}-app-client`,
-    authFlows: ['ALLOW_USER_PASSWORD_AUTH', 'ALLOW_USER_SRP_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'],
-  }];
+  // Ensure clients exist.
+  //
+  // Adoption-safe defaulting: if config.clients is undefined AND the pool
+  // already has at least one client (CDK-named, console-created, etc.),
+  // leave it alone. Forge would otherwise create a sibling client called
+  // `${appName}-app-client` next to whatever's already there, leaving the
+  // user with two clients to choose from. Only fall through to the default
+  // when the pool is genuinely client-less.
+  const desiredClients = config.clients
+    ?? (existing.clients.length === 0
+        ? [{
+            name: `${appName}-app-client`,
+            authFlows: ['ALLOW_USER_PASSWORD_AUTH', 'ALLOW_USER_SRP_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'],
+          }]
+        : []);
 
   for (const dc of desiredClients) {
     const existingClient = existing.clients.find(c => c.clientName === dc.name);

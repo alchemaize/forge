@@ -161,6 +161,15 @@ export async function applyLayer(
   };
 }
 
+export async function destroyLayer(): Promise<never> {
+  throw new Error(
+    'forge refuses to destroy Lambda layers. Live functions referencing a\n' +
+    'specific layer version break on the next cold start if that version\n' +
+    'is deleted. To remove a layer, first detach it from every function\n' +
+    '(forge plan will show drift), then use the AWS Console.'
+  );
+}
+
 // Suppress unused-import warnings.
 void ListLayerVersionsCommand;
 void GetLayerVersionCommand;

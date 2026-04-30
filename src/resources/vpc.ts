@@ -81,23 +81,52 @@ export async function describeVpc(
     }));
     const subnets = subnetsRes.Subnets ?? [];
 
+    // Classify subnets via route tables, not Name tags. Real-world VPCs name
+    // their subnets `db-subnet-XXX`, `eks-XXX`, etc., which the Name-tag
+    // heuristic misclassifies. The route-table check is the actual semantic:
+    //   route → IGW (igw-*)        => Public
+    //   route → NAT (nat-*)        => Private (egress-only)
+    //   no IGW or NAT route        => Isolated
+    const rtRes = await ec2.send(new DescribeRouteTablesCommand({
+      Filters: [{ Name: 'vpc-id', Values: [config.vpcId] }],
+    }));
+    const routeTables = rtRes.RouteTables ?? [];
+
+    const classifyRouteTable = (rt: typeof routeTables[number]): 'public' | 'private' | 'isolated' => {
+      for (const route of rt.Routes ?? []) {
+        if (route.GatewayId?.startsWith('igw-')) return 'public';
+        if (route.NatGatewayId?.startsWith('nat-')) return 'private';
+        if (route.TransitGatewayId) return 'private';   // TGW egress is "private"
+        if (route.VpcPeeringConnectionId) return 'private';
+      }
+      return 'isolated';
+    };
+
+    // Build subnet -> tier map. Subnets explicitly associated with an RT use
+    // that table. Subnets without an explicit association use the VPC's
+    // main route table (the one with Associations.Main === true).
+    const subnetTier = new Map<string, 'public' | 'private' | 'isolated'>();
+    let mainRouteTable: typeof routeTables[number] | undefined;
+    for (const rt of routeTables) {
+      const isMain = rt.Associations?.some(a => a.Main === true);
+      if (isMain) mainRouteTable = rt;
+      const tier = classifyRouteTable(rt);
+      for (const assoc of rt.Associations ?? []) {
+        if (assoc.SubnetId) subnetTier.set(assoc.SubnetId, tier);
+      }
+    }
+    const mainTier = mainRouteTable ? classifyRouteTable(mainRouteTable) : 'isolated';
+
     const publicSubnetIds: string[] = [];
     const privateSubnetIds: string[] = [];
     const isolatedSubnetIds: string[] = [];
 
     for (const subnet of subnets) {
-      const nameTag = subnet.Tags?.find(t => t.Key === 'Name')?.Value ?? '';
       const id = subnet.SubnetId!;
-      if (nameTag.includes('Public') || nameTag.includes('public') || subnet.MapPublicIpOnLaunch) {
-        publicSubnetIds.push(id);
-      } else if (nameTag.includes('Private') || nameTag.includes('private')) {
-        privateSubnetIds.push(id);
-      } else if (nameTag.includes('Isolated') || nameTag.includes('isolated')) {
-        isolatedSubnetIds.push(id);
-      } else {
-        // Default: if it has a route to NAT, it's private; if no route to IGW/NAT, isolated
-        privateSubnetIds.push(id);
-      }
+      const tier = subnetTier.get(id) ?? mainTier;
+      if (tier === 'public') publicSubnetIds.push(id);
+      else if (tier === 'private') privateSubnetIds.push(id);
+      else isolatedSubnetIds.push(id);
     }
 
     // Get NAT gateway
