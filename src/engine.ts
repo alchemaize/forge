@@ -45,6 +45,13 @@ import * as ecr from './resources/ecr.js';
 import * as alb from './resources/alb.js';
 import * as ecs from './resources/ecs.js';
 import * as waf from './resources/waf.js';
+import * as iam from './resources/iam.js';
+import * as restApi from './resources/rest-api.js';
+import * as ec2Asg from './resources/ec2-asg.js';
+import * as bedrock from './resources/bedrock.js';
+import * as sagemaker from './resources/sagemaker.js';
+import * as opensearch from './resources/opensearch.js';
+import * as glueAthena from './resources/glue-athena.js';
 
 // ---------------------------------------------------------------------------
 // Plan
@@ -176,6 +183,56 @@ export async function plan(config: ForgeConfig): Promise<Plan> {
   // WAF web ACLs.
   for (const aclConfig of config.webAcls ?? []) {
     await waf.planWebAcl(ctx, aclConfig, config.app, p);
+  }
+
+  // IAM standalone resources.
+  for (const userConfig of config.iamUsers ?? []) {
+    await iam.planIamUser(ctx, userConfig, config.app, p);
+  }
+  for (const groupConfig of config.iamGroups ?? []) {
+    await iam.planIamGroup(ctx, groupConfig, config.app, p);
+  }
+  for (const ipConfig of config.iamInstanceProfiles ?? []) {
+    await iam.planInstanceProfile(ctx, ipConfig, config.app, p);
+  }
+
+  // REST APIs.
+  for (const restConfig of config.restApis ?? []) {
+    await restApi.planRestApi(ctx, restConfig, config.app, p);
+  }
+
+  // EC2 launch templates + auto scaling groups.
+  for (const ltConfig of config.launchTemplates ?? []) {
+    await ec2Asg.planLaunchTemplate(ctx, ltConfig, config.app, p);
+  }
+  for (const asgConfig of config.autoScalingGroups ?? []) {
+    await ec2Asg.planAsg(ctx, asgConfig, config.app, p);
+  }
+
+  // Bedrock.
+  for (const ptConfig of config.bedrock?.provisionedThroughputs ?? []) {
+    await bedrock.planProvisionedThroughput(ctx, ptConfig, config.app, p);
+  }
+  for (const grConfig of config.bedrock?.guardrails ?? []) {
+    await bedrock.planGuardrail(ctx, grConfig, config.app, p);
+  }
+
+  // Sagemaker endpoints.
+  for (const seConfig of config.sagemakerEndpoints ?? []) {
+    await sagemaker.planSagemakerEndpoint(ctx, seConfig, config.app, p);
+  }
+
+  // OpenSearch.
+  for (const osConfig of config.openSearchDomains ?? []) {
+    await opensearch.planOpenSearchDomain(ctx, osConfig, config.app, p);
+  }
+
+  // Glue + Athena.
+  for (const gdConfig of config.glueDatabases ?? []) {
+    await glueAthena.planGlueDatabase(ctx, gdConfig, config.app, p);
+  }
+  for (const wgConfig of config.athenaWorkgroups ?? []) {
+    await glueAthena.planAthenaWorkgroup(ctx, wgConfig, config.app, p);
   }
 
   // CloudFront
@@ -504,6 +561,71 @@ export async function apply(config: ForgeConfig): Promise<void> {
   if (config.webAcls?.length) console.log(`▸ Phase: WAF (${config.webAcls.length})`);
   for (const aclConfig of config.webAcls ?? []) {
     await waf.applyWebAcl(ctx, aclConfig, config.app);
+  }
+
+  // Phase 24: IAM standalone (groups before users, then instance profiles
+  // — instance profiles reference roles that may also exist outside
+  // forge config).
+  if (config.iamGroups?.length) console.log(`▸ Phase: IAM Groups (${config.iamGroups.length})`);
+  for (const groupConfig of config.iamGroups ?? []) {
+    await iam.applyIamGroup(ctx, groupConfig, config.app);
+  }
+  if (config.iamUsers?.length) console.log(`▸ Phase: IAM Users (${config.iamUsers.length})`);
+  for (const userConfig of config.iamUsers ?? []) {
+    await iam.applyIamUser(ctx, userConfig, config.app);
+  }
+  if (config.iamInstanceProfiles?.length) console.log(`▸ Phase: IAM Instance Profiles (${config.iamInstanceProfiles.length})`);
+  for (const ipConfig of config.iamInstanceProfiles ?? []) {
+    await iam.applyInstanceProfile(ctx, ipConfig, config.app);
+  }
+
+  // Phase 25: REST APIs. After Lambda so targetLambda references resolve.
+  if (config.restApis?.length) console.log(`▸ Phase: REST API (${config.restApis.length})`);
+  for (const restConfig of config.restApis ?? []) {
+    await restApi.applyRestApi(ctx, restConfig, config.app);
+  }
+
+  // Phase 26: EC2 launch templates + ASGs. Templates first.
+  if (config.launchTemplates?.length) console.log(`▸ Phase: Launch Templates (${config.launchTemplates.length})`);
+  for (const ltConfig of config.launchTemplates ?? []) {
+    await ec2Asg.applyLaunchTemplate(ctx, ltConfig, config.app);
+  }
+  if (config.autoScalingGroups?.length) console.log(`▸ Phase: ASG (${config.autoScalingGroups.length})`);
+  for (const asgConfig of config.autoScalingGroups ?? []) {
+    await ec2Asg.applyAsg(ctx, asgConfig, config.app);
+  }
+
+  // Phase 27: Bedrock (provisioned throughputs + guardrails).
+  if (config.bedrock?.provisionedThroughputs?.length || config.bedrock?.guardrails?.length) {
+    console.log(`▸ Phase: Bedrock`);
+  }
+  for (const ptConfig of config.bedrock?.provisionedThroughputs ?? []) {
+    await bedrock.applyProvisionedThroughput(ctx, ptConfig, config.app);
+  }
+  for (const grConfig of config.bedrock?.guardrails ?? []) {
+    await bedrock.applyGuardrail(ctx, grConfig, config.app);
+  }
+
+  // Phase 28: Sagemaker endpoints.
+  if (config.sagemakerEndpoints?.length) console.log(`▸ Phase: Sagemaker (${config.sagemakerEndpoints.length})`);
+  for (const seConfig of config.sagemakerEndpoints ?? []) {
+    await sagemaker.applySagemakerEndpoint(ctx, seConfig, config.app);
+  }
+
+  // Phase 29: OpenSearch domains.
+  if (config.openSearchDomains?.length) console.log(`▸ Phase: OpenSearch (${config.openSearchDomains.length})`);
+  for (const osConfig of config.openSearchDomains ?? []) {
+    await opensearch.applyOpenSearchDomain(ctx, osConfig, config.app);
+  }
+
+  // Phase 30: Glue + Athena.
+  if (config.glueDatabases?.length) console.log(`▸ Phase: Glue (${config.glueDatabases.length})`);
+  for (const gdConfig of config.glueDatabases ?? []) {
+    await glueAthena.applyGlueDatabase(ctx, gdConfig, config.app);
+  }
+  if (config.athenaWorkgroups?.length) console.log(`▸ Phase: Athena (${config.athenaWorkgroups.length})`);
+  for (const wgConfig of config.athenaWorkgroups ?? []) {
+    await glueAthena.applyAthenaWorkgroup(ctx, wgConfig, config.app);
   }
 
   // Suppress unused-import warning for the standalone ecr module — the
@@ -888,6 +1010,116 @@ export async function status(config: ForgeConfig): Promise<void> {
       console.log(`  WebACL: ${state.name} (${state.scope}, ${state.ruleCount} rules, ${state.associatedResources.length} associations)`);
     } else {
       console.log(`  WebACL: ${aclConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // IAM standalone
+  for (const userConfig of config.iamUsers ?? []) {
+    const state = await iam.describeIamUser(ctx, userConfig);
+    if (state) {
+      console.log(`  IAM User: ${state.userName} (${state.attachedPolicies.length} policies, ${state.groups.length} groups)`);
+    } else {
+      console.log(`  IAM User: ${userConfig.name} — NOT FOUND`);
+    }
+  }
+  for (const groupConfig of config.iamGroups ?? []) {
+    const state = await iam.describeIamGroup(ctx, groupConfig);
+    if (state) {
+      console.log(`  IAM Group: ${state.groupName} (${state.attachedPolicies.length} policies)`);
+    } else {
+      console.log(`  IAM Group: ${groupConfig.name} — NOT FOUND`);
+    }
+  }
+  for (const ipConfig of config.iamInstanceProfiles ?? []) {
+    const state = await iam.describeInstanceProfile(ctx, ipConfig);
+    if (state) {
+      console.log(`  IAM Instance Profile: ${state.name} (role=${state.roles.join(',') || 'none'})`);
+    } else {
+      console.log(`  IAM Instance Profile: ${ipConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // REST APIs
+  for (const restConfig of config.restApis ?? []) {
+    const state = await restApi.describeRestApi(ctx, restConfig);
+    if (state) {
+      console.log(`  REST API: ${state.name} (${state.endpointType}, ${state.resourceCount} resources, ${state.invokeUrl ?? 'no stage'})`);
+    } else {
+      console.log(`  REST API: ${restConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // EC2 launch templates + ASGs
+  for (const ltConfig of config.launchTemplates ?? []) {
+    const state = await ec2Asg.describeLaunchTemplate(ctx, ltConfig);
+    if (state) {
+      console.log(`  Launch Template: ${state.name} (v${state.latestVersion}, default=v${state.defaultVersion})`);
+    } else {
+      console.log(`  Launch Template: ${ltConfig.name} — NOT FOUND`);
+    }
+  }
+  for (const asgConfig of config.autoScalingGroups ?? []) {
+    const state = await ec2Asg.describeAsg(ctx, asgConfig);
+    if (state) {
+      console.log(`  ASG: ${state.name} (${state.desiredCapacity}/${state.minSize}-${state.maxSize}, ${state.targetGroupArns.length} TGs)`);
+    } else {
+      console.log(`  ASG: ${asgConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Bedrock
+  for (const ptConfig of config.bedrock?.provisionedThroughputs ?? []) {
+    const state = await bedrock.describeProvisionedThroughput(ctx, ptConfig);
+    if (state) {
+      console.log(`  Bedrock Throughput: ${state.name} (${state.modelUnits} units, ${state.status})`);
+    } else {
+      console.log(`  Bedrock Throughput: ${ptConfig.name} — NOT FOUND`);
+    }
+  }
+  for (const grConfig of config.bedrock?.guardrails ?? []) {
+    const state = await bedrock.describeGuardrail(ctx, grConfig);
+    if (state) {
+      console.log(`  Bedrock Guardrail: ${state.name} (v${state.version}, ${state.status})`);
+    } else {
+      console.log(`  Bedrock Guardrail: ${grConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Sagemaker
+  for (const seConfig of config.sagemakerEndpoints ?? []) {
+    const state = await sagemaker.describeSagemakerEndpoint(ctx, seConfig);
+    if (state) {
+      console.log(`  Sagemaker: ${state.name} (${state.status}, ${state.instanceCount}× ${state.instanceType})`);
+    } else {
+      console.log(`  Sagemaker: ${seConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // OpenSearch
+  for (const osConfig of config.openSearchDomains ?? []) {
+    const state = await opensearch.describeOpenSearchDomain(ctx, osConfig);
+    if (state) {
+      console.log(`  OpenSearch: ${state.domainName} (${state.engineVersion}, ${state.instanceCount}× ${state.instanceType}${state.processing ? ', PROCESSING' : ''})`);
+    } else {
+      console.log(`  OpenSearch: ${osConfig.name} — NOT FOUND`);
+    }
+  }
+
+  // Glue + Athena
+  for (const gdConfig of config.glueDatabases ?? []) {
+    const state = await glueAthena.describeGlueDatabase(ctx, gdConfig);
+    if (state) {
+      console.log(`  Glue DB: ${state.name}${state.locationUri ? ` (${state.locationUri})` : ''}`);
+    } else {
+      console.log(`  Glue DB: ${gdConfig.name} — NOT FOUND`);
+    }
+  }
+  for (const wgConfig of config.athenaWorkgroups ?? []) {
+    const state = await glueAthena.describeAthenaWorkgroup(ctx, wgConfig);
+    if (state) {
+      console.log(`  Athena Workgroup: ${state.name} (${state.state}${state.resultLocation ? `, results=${state.resultLocation}` : ''})`);
+    } else {
+      console.log(`  Athena Workgroup: ${wgConfig.name} — NOT FOUND`);
     }
   }
 

@@ -204,6 +204,18 @@ Examples:
         'ecs-cluster': async () => (await import('./resources/ecs.js')).destroyEcsCluster(),
         'ecs-service': async () => (await import('./resources/ecs.js')).destroyEcsService(),
         'web-acl': async () => (await import('./resources/waf.js')).destroyWebAcl(),
+        'iam-user': async () => (await import('./resources/iam.js')).destroyIamUser(ctx, resourceName),
+        'iam-group': async () => (await import('./resources/iam.js')).destroyIamGroup(),
+        'iam-instance-profile': async () => (await import('./resources/iam.js')).destroyInstanceProfile(),
+        'rest-api': async () => (await import('./resources/rest-api.js')).destroyRestApi(ctx, resourceName),
+        'launch-template': async () => (await import('./resources/ec2-asg.js')).destroyLaunchTemplate(),
+        asg: async () => (await import('./resources/ec2-asg.js')).destroyAsg(),
+        'bedrock-throughput': async () => (await import('./resources/bedrock.js')).destroyProvisionedThroughput(),
+        'bedrock-guardrail': async () => (await import('./resources/bedrock.js')).destroyGuardrail(),
+        'sagemaker-endpoint': async () => (await import('./resources/sagemaker.js')).destroySagemakerEndpoint(),
+        'opensearch-domain': async () => (await import('./resources/opensearch.js')).destroyOpenSearchDomain(),
+        'glue-database': async () => (await import('./resources/glue-athena.js')).destroyGlueDatabase(),
+        'athena-workgroup': async () => (await import('./resources/glue-athena.js')).destroyAthenaWorkgroup(),
       };
 
       const handler = destroyRegistry[resourceType];

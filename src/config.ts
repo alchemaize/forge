@@ -423,8 +423,36 @@ export interface EventBridgeRuleConfig {
 }
 
 // ---------------------------------------------------------------------------
-// IAM
+// IAM (standalone resources — distinct from Lambda's inline role)
 // ---------------------------------------------------------------------------
+
+export interface IamUserConfig {
+  /** User name. */
+  name: string;
+  /** Path (default: '/'). Affects IAM hierarchy display only. */
+  path?: string;
+  /** Managed policy ARNs to attach. */
+  managedPolicies?: string[];
+  /** Group names this user belongs to. */
+  groups?: string[];
+  /** Tags. */
+  tags?: Record<string, string>;
+}
+
+export interface IamGroupConfig {
+  /** Group name. */
+  name: string;
+  path?: string;
+  /** Managed policy ARNs attached to the group (every member inherits). */
+  managedPolicies?: string[];
+}
+
+export interface IamInstanceProfileConfig {
+  /** Instance profile name (typically matches a role name). */
+  name: string;
+  /** Role name to associate (must be an existing role with EC2 trust). */
+  roleName: string;
+}
 
 export interface IamRoleConfig {
   name: string;
@@ -1175,6 +1203,230 @@ export interface KmsKeyConfig {
 }
 
 // ---------------------------------------------------------------------------
+// API Gateway REST API
+// ---------------------------------------------------------------------------
+
+export interface RestApiResourceConfig {
+  /** Path component, e.g., 'users' or '{userId}'. Forge derives parent links
+   * from order in the array — define parents before children. */
+  path: string;
+  /** Methods on this resource. */
+  methods?: Array<{
+    httpMethod: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'ANY';
+    /** Lambda function name to integrate with (resolved against config.lambda). */
+    targetLambda?: string;
+    /** Authorization type. Default: 'NONE' for OPTIONS, 'AWS_IAM' for others. */
+    authorizationType?: 'NONE' | 'AWS_IAM' | 'COGNITO_USER_POOLS' | 'CUSTOM';
+    /** Cognito authorizer name (when authorizationType is COGNITO_USER_POOLS). */
+    authorizerName?: string;
+    /** API key required for this method. Default: false. */
+    apiKeyRequired?: boolean;
+  }>;
+}
+
+export interface RestApiConfig {
+  name: string;
+  description?: string;
+  /** API endpoint type. Default: 'REGIONAL'. EDGE deploys via CloudFront
+   * (extra cost + latency); PRIVATE requires VPC endpoint. */
+  endpointType?: 'REGIONAL' | 'EDGE' | 'PRIVATE';
+  /** Resources (paths). */
+  resources?: RestApiResourceConfig[];
+  /** Stage name (default: 'prod'). */
+  stageName?: string;
+  /** API key + usage plan support. */
+  apiKey?: { name: string; throttle?: { rateLimit?: number; burstLimit?: number } };
+}
+
+// ---------------------------------------------------------------------------
+// EC2 Launch Templates + Auto Scaling Groups
+// ---------------------------------------------------------------------------
+
+export interface LaunchTemplateConfig {
+  name: string;
+  /** AMI ID. Use SSM-resolved alias like 'resolve:ssm:/aws/service/ami-amazon-linux-latest/...' for auto-update. */
+  imageId: string;
+  /** Instance type (default: 't3.small'). */
+  instanceType?: string;
+  /** Key pair name for SSH (optional — prefer SSM Session Manager). */
+  keyName?: string;
+  /** Security group IDs. */
+  securityGroupIds?: string[];
+  /** IAM instance profile name. */
+  instanceProfileName?: string;
+  /** User data script (will be base64-encoded). */
+  userData?: string;
+  /** EBS volume config. */
+  blockDevice?: {
+    deviceName?: string;
+    volumeSize?: number;
+    volumeType?: 'gp3' | 'gp2' | 'io1' | 'io2' | 'standard';
+    encrypted?: boolean;
+  };
+  /** Tags applied to launched instances. */
+  tags?: Record<string, string>;
+}
+
+export interface AutoScalingGroupConfig {
+  name: string;
+  /** Launch template name (declared in config.launchTemplates). */
+  launchTemplate: string;
+  /** Min / Max / Desired capacity. */
+  minSize: number;
+  maxSize: number;
+  desiredCapacity?: number;
+  /** Subnet IDs (multi-AZ recommended). */
+  subnetIds: string[];
+  /** Health check type. */
+  healthCheckType?: 'EC2' | 'ELB';
+  /** Health check grace period (seconds). Default: 300. */
+  healthCheckGracePeriod?: number;
+  /** Target group ARNs to register instances with. */
+  targetGroupArns?: string[];
+  /** Tags propagated to instances. */
+  tags?: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// Bedrock
+// ---------------------------------------------------------------------------
+
+export interface BedrockProvisionedThroughputConfig {
+  /** Logical name (used in plan output). */
+  name: string;
+  /** Model ID, e.g., 'anthropic.claude-sonnet-4-6-20250514-v1:0'. */
+  modelId: string;
+  /** Number of model units (1 unit ≈ 1k tokens/sec ingress). */
+  modelUnits: number;
+  /** Commitment duration. Default: no commitment (pay hourly). */
+  commitmentDuration?: 'OneMonth' | 'SixMonths';
+}
+
+export interface BedrockGuardrailConfig {
+  name: string;
+  description?: string;
+  /** Block messaging shown when guardrail blocks input. */
+  blockedInputMessaging?: string;
+  /** Block messaging shown when guardrail blocks output. */
+  blockedOutputsMessaging?: string;
+  /** Topic policy: list of denied topic names + their definitions. */
+  deniedTopics?: Array<{ name: string; definition: string; examples?: string[] }>;
+  /** Content filter strengths (per category). */
+  contentFilters?: Array<{
+    type: 'SEXUAL' | 'VIOLENCE' | 'HATE' | 'INSULTS' | 'MISCONDUCT' | 'PROMPT_ATTACK';
+    inputStrength?: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH';
+    outputStrength?: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH';
+  }>;
+  /** PII redaction. */
+  piiEntities?: Array<{ type: string; action: 'BLOCK' | 'ANONYMIZE' }>;
+}
+
+/**
+ * Knowledge bases and agents are adoption-only today (Forge captures
+ * existing ones for visibility but doesn't create them — both have
+ * complex multi-step setup involving S3 sources, vector embeddings,
+ * and IAM that's almost always done via Console + import).
+ */
+export interface BedrockKnowledgeBaseConfig {
+  name: string;
+}
+
+export interface BedrockAgentConfig {
+  name: string;
+}
+
+export interface BedrockConfig {
+  provisionedThroughputs?: BedrockProvisionedThroughputConfig[];
+  guardrails?: BedrockGuardrailConfig[];
+  knowledgeBases?: BedrockKnowledgeBaseConfig[];
+  agents?: BedrockAgentConfig[];
+}
+
+// ---------------------------------------------------------------------------
+// Sagemaker
+// ---------------------------------------------------------------------------
+
+export interface SagemakerEndpointConfig {
+  name: string;
+  /**
+   * Endpoint config name. Defaults to '{endpoint-name}-config'. The config
+   * defines the model + instance type + count, and is versioned by AWS;
+   * Forge creates a new config when the model changes and points the
+   * endpoint at it (UpdateEndpoint).
+   */
+  endpointConfigName?: string;
+  /** Model name (must already exist; create via Console / Studio). */
+  modelName: string;
+  /** Variant config. */
+  variant?: {
+    name?: string;
+    instanceType?: string;
+    instanceCount?: number;
+    initialWeight?: number;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// OpenSearch
+// ---------------------------------------------------------------------------
+
+export interface OpenSearchDomainConfig {
+  name: string;
+  /** Engine version, e.g., 'OpenSearch_2.13'. */
+  engineVersion?: string;
+  /** Cluster config. */
+  clusterConfig?: {
+    instanceType?: string;
+    instanceCount?: number;
+    dedicatedMasterEnabled?: boolean;
+    masterInstanceType?: string;
+    masterInstanceCount?: number;
+    zoneAwarenessEnabled?: boolean;
+  };
+  /** EBS volume per node. */
+  ebs?: {
+    volumeSize?: number;
+    volumeType?: 'gp3' | 'gp2' | 'io1';
+  };
+  /** Encryption at rest (recommended). */
+  encryptAtRest?: boolean;
+  /** Node-to-node encryption. */
+  nodeToNodeEncryption?: boolean;
+  /** Access policy. */
+  accessPolicy?: object;
+  /** VPC subnet IDs (place inside a VPC). */
+  subnetIds?: string[];
+  /** Security group IDs. */
+  securityGroupIds?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Glue + Athena
+// ---------------------------------------------------------------------------
+
+export interface GlueDatabaseConfig {
+  name: string;
+  description?: string;
+  /** S3 location for default external tables. */
+  locationUri?: string;
+  /** Database parameters. */
+  parameters?: Record<string, string>;
+}
+
+export interface AthenaWorkgroupConfig {
+  name: string;
+  description?: string;
+  /** Output location S3 URI. */
+  resultLocation?: string;
+  /** Bytes scanned cutoff per query (for cost protection). */
+  bytesScannedCutoff?: number;
+  /** State (default: 'ENABLED'). */
+  state?: 'ENABLED' | 'DISABLED';
+  /** Encryption configuration. */
+  encryption?: { type: 'SSE_S3' | 'SSE_KMS' | 'CSE_KMS'; kmsKey?: string };
+}
+
+// ---------------------------------------------------------------------------
 // Top-level config
 // ---------------------------------------------------------------------------
 
@@ -1229,6 +1481,28 @@ export interface ForgeConfig {
   ecsServices?: EcsServiceConfig[];
   /** WAF v2 web ACLs (REGIONAL for ALB / API GW; CLOUDFRONT for CF). */
   webAcls?: WafWebAclConfig[];
+  /** IAM users (with managed policies + group membership). */
+  iamUsers?: IamUserConfig[];
+  /** IAM groups. */
+  iamGroups?: IamGroupConfig[];
+  /** IAM instance profiles for EC2. */
+  iamInstanceProfiles?: IamInstanceProfileConfig[];
+  /** API Gateway REST APIs (distinct from the HTTP API in `apiGateway`). */
+  restApis?: RestApiConfig[];
+  /** EC2 launch templates (used by ASGs and standalone instances). */
+  launchTemplates?: LaunchTemplateConfig[];
+  /** EC2 Auto Scaling Groups. */
+  autoScalingGroups?: AutoScalingGroupConfig[];
+  /** Bedrock provisioned throughputs + guardrails. */
+  bedrock?: BedrockConfig;
+  /** Sagemaker endpoints + endpoint configs. */
+  sagemakerEndpoints?: SagemakerEndpointConfig[];
+  /** OpenSearch domains. */
+  openSearchDomains?: OpenSearchDomainConfig[];
+  /** Glue databases. */
+  glueDatabases?: GlueDatabaseConfig[];
+  /** Athena workgroups. */
+  athenaWorkgroups?: AthenaWorkgroupConfig[];
 }
 
 /**
